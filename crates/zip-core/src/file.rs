@@ -21,6 +21,11 @@ use std::sync::{Arc, Mutex};
 ///   the zero-copy read path ([`crate::codec::decode_slice_into`]) for
 ///   contiguous, buffer-backed sources. The buffer is borrowed from a
 ///   [`BufferPool`] and returned to it when the reader is dropped.
+//
+// `large_enum_variant` is deliberately allowed: boxing `Inner::Streaming`
+// (which wraps the already-large `Decoder`) would add a heap allocation on the
+// read path and change layout for no correctness benefit.
+#[allow(clippy::large_enum_variant)]
 enum Inner {
     /// Streaming decoder fed by the entry source.
     Streaming(Decoder),
@@ -161,12 +166,10 @@ impl Read for EntryReader {
             Ok(n)
         } else {
             // EOF of the decompressed stream: verify size + CRC.
-            if !self.finished {
-                if !self.verify() {
-                    // Surface the error on this read call.
-                    if let Some(err) = self.integrity_err.take() {
-                        return Err(err);
-                    }
+            if !self.finished && !self.verify() {
+                // Surface the error on this read call.
+                if let Some(err) = self.integrity_err.take() {
+                    return Err(err);
                 }
             }
             Ok(0)
@@ -178,11 +181,14 @@ impl Drop for EntryReader {
     /// Return any pooled decode buffer to the archive's `BufferPool` so it can
     /// be reused on a later `open_entry` call (avoids per-entry allocation).
     fn drop(&mut self) {
-        if let Inner::Buffered { data, pool, .. } = &mut self.inner {
-            if let Some(pool) = pool {
-                if let Ok(mut guard) = pool.lock() {
-                    guard.release(std::mem::take(data));
-                }
+        if let Inner::Buffered {
+            data,
+            pool: Some(pool),
+            ..
+        } = &mut self.inner
+        {
+            if let Ok(mut guard) = pool.lock() {
+                guard.release(std::mem::take(data));
             }
         }
     }

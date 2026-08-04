@@ -209,7 +209,7 @@ fn read_entries(
 
 fn source_len(src: &mut Box<dyn Source>) -> Result<u64> {
     let pos = src
-        .seek(SeekFrom::Current(0))
+        .stream_position()
         .map_err(|e| ZipError::with_system(ZipErrorCode::Seek, e))?;
     let len = src
         .seek(SeekFrom::End(0))

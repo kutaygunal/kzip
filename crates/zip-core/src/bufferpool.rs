@@ -109,7 +109,7 @@ mod tests {
         pool.release(b);
 
         // Reuse then re-size.
-        let mut b2 = pool.acquire_len(8192);
+        let b2 = pool.acquire_len(8192);
         assert_eq!(b2.capacity(), 8192);
         assert_eq!(b2.len(), 8192);
     }

@@ -51,7 +51,7 @@ fn bench_zerocopy(c: &mut Criterion) {
     // 1. Zero-copy: decode directly from the borrowed `comp` slice.
     c.bench_function("decode_zero_copy_slice", |b| {
         b.iter_batched(
-            || Vec::<u8>::new(),
+            Vec::<u8>::new,
             |mut out| {
                 decode_slice_into(&comp, method, clen, &mut out).unwrap();
                 out

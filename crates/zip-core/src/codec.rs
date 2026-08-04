@@ -12,6 +12,12 @@ use crate::source::Source;
 use std::io::{self, BufReader, Read};
 
 /// A streaming decoder positioned at the start of an entry's compressed data.
+//
+// `large_enum_variant` is deliberately allowed: boxing the `Deflate`/`Bzip2`
+// variants would add a heap allocation on the decode hot path and change the
+// enum's layout. There is no correctness need to shrink it (constructed once
+// per entry read), so we prefer the zero-allocation layout.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum Decoder {
     /// Stored (uncompressed) entry.
     Store(io::Take<Box<dyn Source>>),

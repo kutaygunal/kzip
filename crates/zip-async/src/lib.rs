@@ -86,6 +86,10 @@ impl AsyncArchive {
     }
 }
 
+/// A completed blocking read: the reader, its decoded staging buffer, and the
+/// byte count (or error) produced by the read.
+type ReadResult = (EntryReader, Vec<u8>, io::Result<usize>);
+
 /// A bridge-mode async reader for one archive entry.
 ///
 /// Internally it owns a `zip-core` [`EntryReader`]. Each poll launches a
@@ -96,7 +100,7 @@ impl AsyncArchive {
 pub struct AsyncEntryReader {
     inner: Mutex<Option<EntryReader>>,
     /// In-flight blocking read, returned with the reader and its staging buffer.
-    pending: Option<oneshot::Receiver<(EntryReader, Vec<u8>, io::Result<usize>)>>,
+    pending: Option<oneshot::Receiver<ReadResult>>,
     /// Buffer holding decoded bytes not yet handed to the caller.
     staging: Vec<u8>,
     /// Read position into `staging`.
@@ -133,10 +137,7 @@ impl AsyncEntryReader {
     }
 
     /// Handle a completed blocking read, storing the reader + data for reuse.
-    fn finish_read(
-        &mut self,
-        msg: (EntryReader, Vec<u8>, io::Result<usize>),
-    ) -> Poll<io::Result<()>> {
+    fn finish_read(&mut self, msg: ReadResult) -> Poll<io::Result<()>> {
         let (reader, staging, res) = msg;
         let n = match res {
             Ok(n) => n,
@@ -184,8 +185,7 @@ impl AsyncRead for AsyncEntryReader {
                     Poll::Ready(Err(_)) => {
                         this.pending = None;
                         *this.inner.lock().expect("lock") = None;
-                        return Poll::Ready(Err(io::Error::new(
-                            io::ErrorKind::Other,
+                        return Poll::Ready(Err(io::Error::other(
                             "blocking decode task cancelled",
                         )));
                     }
