@@ -19,11 +19,10 @@ fn build_corpus(count: usize) -> Vec<ArchiveFile> {
         .map(|i| {
             let k = size_classes[i % size_classes.len()]; // KiB
             let n = k * 1024;
-            let content: Vec<u8> = format!(
-                "entry {i} with a compressible repeating payload of roughly {n} bytes ",
-            )
-            .repeat(32)
-            .into_bytes();
+            let content: Vec<u8> =
+                format!("entry {i} with a compressible repeating payload of roughly {n} bytes ",)
+                    .repeat(32)
+                    .into_bytes();
             // Build exactly ~n bytes of compressible text.
             let mut data = Vec::with_capacity(n);
             while data.len() < n {

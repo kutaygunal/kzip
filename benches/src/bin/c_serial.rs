@@ -25,16 +25,11 @@ type ZipSource = c_void;
 struct CApi {
     _lib: Library,
     zip_open: unsafe extern "C" fn(*const libc::c_char, i32, *mut i32) -> *mut ZipHandle,
-    zip_file_add: unsafe extern "C" fn(
-        *mut ZipHandle,
-        *const libc::c_char,
-        *mut ZipSource,
-        u32,
-    ) -> i64,
+    zip_file_add:
+        unsafe extern "C" fn(*mut ZipHandle, *const libc::c_char, *mut ZipSource, u32) -> i64,
     zip_source_buffer_create:
         unsafe extern "C" fn(*const c_void, u64, i32, *mut c_void) -> *mut ZipSource,
-    zip_set_file_compression:
-        unsafe extern "C" fn(*mut ZipHandle, u64, i32, u32) -> i32,
+    zip_set_file_compression: unsafe extern "C" fn(*mut ZipHandle, u64, i32, u32) -> i32,
     zip_close: unsafe extern "C" fn(*mut ZipHandle) -> i32,
     zip_libzip_version: unsafe extern "C" fn() -> *const libc::c_char,
 }

@@ -42,7 +42,14 @@ fn main() {
 
     let mut csv = String::from("impl,version,run,uncompressed_bytes,seconds,mibps\n");
     for (run, (m, s)) in mibs.iter().zip(secs_all.iter()).enumerate() {
-        csv.push_str(&csv_row("rust_zip_core", env!("CARGO_PKG_VERSION"), run + 1, total, *s, *m));
+        csv.push_str(&csv_row(
+            "rust_zip_core",
+            env!("CARGO_PKG_VERSION"),
+            run + 1,
+            total,
+            *s,
+            *m,
+        ));
     }
     std::fs::write("results/rust-serial.csv", csv).unwrap_or_else(|e| {
         eprintln!("cannot write results/rust-serial.csv: {e}");

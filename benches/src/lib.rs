@@ -130,8 +130,13 @@ pub fn median(mut xs: Vec<f64>) -> f64 {
 }
 
 /// Format a CSV row for the serial benchmark results.
-pub fn csv_row(impl_: &str, version: &str, run: usize, bytes: u64, secs: f64, mibps: f64) -> String {
-    format!(
-        "{impl_},{version},{run},{bytes},{secs:.6},{mibps:.3}\n"
-    )
+pub fn csv_row(
+    impl_: &str,
+    version: &str,
+    run: usize,
+    bytes: u64,
+    secs: f64,
+    mibps: f64,
+) -> String {
+    format!("{impl_},{version},{run},{bytes},{secs:.6},{mibps:.3}\n")
 }
