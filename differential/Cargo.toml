@@ -11,11 +11,28 @@ publish = false
 name = "differential"
 path = "src/main.rs"
 
+# Verification binaries (see run-verify.sh).
+[[bin]]
+name = "gen_corpus"
+path = "src/bin/gen_corpus.rs"
+
+[[bin]]
+name = "verify_read"
+path = "src/bin/verify_read.rs"
+
+[[bin]]
+name = "cross_read"
+path = "src/bin/cross_read.rs"
+
 [dependencies]
 libloading.workspace = true
 libc.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+zip-core = { path = "../crates/zip-core" }
+sha2 = "0.10"
+crc32fast = "1"
+flate2 = "1"
 
 # Path to a corpus of .zip files (generated/committed under ../data).
 # The harness opens each, enumerates entries, extracts, and emits a JSON record.

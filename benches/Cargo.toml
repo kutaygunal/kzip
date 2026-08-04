@@ -20,6 +20,34 @@ path = "src/bin/c_serial.rs"
 name = "rust_serial"
 path = "src/bin/rust_serial.rs"
 
+[[bin]]
+name = "bench_small"
+path = "src/bin/bench_small.rs"
+
+[[bin]]
+name = "bench_large"
+path = "src/bin/bench_large.rs"
+
+[[bin]]
+name = "bench_mixed"
+path = "src/bin/bench_mixed.rs"
+
+[[bin]]
+name = "bench_read"
+path = "src/bin/bench_read.rs"
+
+[[bin]]
+name = "bench_random"
+path = "src/bin/bench_random.rs"
+
+[[bin]]
+name = "bench_modify"
+path = "src/bin/bench_modify.rs"
+
+[[bin]]
+name = "bench_memory"
+path = "src/bin/bench_memory.rs"
+
 [dev-dependencies]
 criterion.workspace = true
 

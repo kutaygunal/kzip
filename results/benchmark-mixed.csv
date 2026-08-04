@@ -1,0 +1,16 @@
+impl,version,workload,run,uncompressed_bytes,seconds,mibps
+c_libzip,1.11.4,mixed_serial,1,77332480,0.198074,372.336
+c_libzip,1.11.4,mixed_serial,2,77332480,0.197356,373.691
+c_libzip,1.11.4,mixed_serial,3,77332480,0.196905,374.546
+c_libzip,1.11.4,mixed_serial,4,77332480,0.197822,372.811
+c_libzip,1.11.4,mixed_serial,5,77332480,0.200521,367.791
+rust_zip_core,0.1.0,mixed_parallel,1,77332480,0.011913,6190.820
+rust_zip_core,0.1.0,mixed_parallel,2,77332480,0.012447,5925.170
+rust_zip_core,0.1.0,mixed_parallel,3,77332480,0.012920,5708.116
+rust_zip_core,0.1.0,mixed_parallel,4,77332480,0.012550,5876.635
+rust_zip_core,0.1.0,mixed_parallel,5,77332480,0.011805,6247.617
+rust_zip_core,0.1.0,mixed_serial,1,77332480,0.089020,828.469
+rust_zip_core,0.1.0,mixed_serial,2,77332480,0.088822,830.310
+rust_zip_core,0.1.0,mixed_serial,3,77332480,0.086024,857.324
+rust_zip_core,0.1.0,mixed_serial,4,77332480,0.089727,821.941
+rust_zip_core,0.1.0,mixed_serial,5,77332480,0.088886,829.718

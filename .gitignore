@@ -30,3 +30,11 @@ data/tmp_*
 
 # Local results that are not committed baselines
 results/*.err
+
+# Regenerable C-vs-Rust verification artifacts (recreate via run-verify.sh)
+/data/corpus-verify/
+results/verify-read.json
+results/verify-read-rust.json
+results/verify-crossread.json
+results/verify-read.diff
+results/verify-*.err

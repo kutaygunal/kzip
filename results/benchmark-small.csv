@@ -1,0 +1,11 @@
+impl,version,workload,run,uncompressed_bytes,seconds,mibps
+c_libzip,1.11.4,small,1,100038407,0.217751,438.133
+c_libzip,1.11.4,small,2,100038407,0.215116,443.500
+c_libzip,1.11.4,small,3,100038407,0.216159,441.360
+c_libzip,1.11.4,small,4,100038407,0.217039,439.570
+c_libzip,1.11.4,small,5,100038407,0.215172,443.386
+rust_zip_core,0.1.0,small,1,100038407,0.150150,635.393
+rust_zip_core,0.1.0,small,2,100038407,0.149309,638.971
+rust_zip_core,0.1.0,small,3,100038407,0.153483,621.594
+rust_zip_core,0.1.0,small,4,100038407,0.146597,650.790
+rust_zip_core,0.1.0,small,5,100038407,0.147418,647.167
