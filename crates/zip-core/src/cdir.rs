@@ -51,7 +51,32 @@ pub fn read_central_dir(src: &mut Box<dyn Source>) -> Result<CentralDir> {
         }
     }
 
+    // No valid EOCD was found. Distinguish a truncated zip from a non-zip the
+    // way libzip does (`_zip_find_central_dir`): if the archive begins with a
+    // ZIP signature (`PK`) but lacks a parseable EOCD, it is a truncated zip
+    // (ZIP_ER_TRUNCATED_ZIP); otherwise it is not a zip at all
+    // (ZIP_ER_NOZIP).
+    if source_starts_with_pk(src)? {
+        return Err(ZipError::new(ZipErrorCode::TruncatedZip));
+    }
     Err(ZipError::new(ZipErrorCode::Nozip))
+}
+
+/// Whether the source begins with the `PK` signature shared by all ZIP record
+/// magics (local header, central directory, EOCD, ZIP64 EOCD).
+fn source_starts_with_pk(src: &mut Box<dyn Source>) -> Result<bool> {
+    let pos = src
+        .stream_position()
+        .map_err(|e| ZipError::with_system(ZipErrorCode::Seek, e))?;
+    src.seek(SeekFrom::Start(0))
+        .map_err(|e| ZipError::with_system(ZipErrorCode::Seek, e))?;
+    let mut head = [0u8; 2];
+    let n = src
+        .read(&mut head)
+        .map_err(|e| ZipError::with_system(ZipErrorCode::Read, e))?;
+    src.seek(SeekFrom::Start(pos))
+        .map_err(|e| ZipError::with_system(ZipErrorCode::Seek, e))?;
+    Ok(n == 2 && head == [0x50, 0x4B])
 }
 
 /// Attempt to parse the central directory for the EOCD record located at
@@ -160,11 +185,19 @@ fn read_eocd64(src: &mut Box<dyn Source>, offset: u64) -> Result<Option<Zip64Eoc
     if raw[0..4] != magic::EOCD64 {
         return Ok(None);
     }
-    // Layout: magic(4) + reserved(8) = 12; then size(8), num_this(4)... We want
-    // cdir_size at [24..32] and cdir_offset at [32..40] and num_entries at [40..48].
-    let cdir_size = u64::from_le_bytes(raw[24..32].try_into().unwrap());
-    let cdir_offset = u64::from_le_bytes(raw[32..40].try_into().unwrap());
-    let num_entries = u64::from_le_bytes(raw[40..48].try_into().unwrap());
+    // ZIP64 EOCD record layout (PK\x06\x06), offsets relative to the magic:
+    //   [0:4]   magic
+    //   [4:12]  size of the ZIP64 EOCD record (excluding these 12 bytes)
+    //   [12:16] version made by (2) + version needed (2)
+    //   [16:20] number of this disk
+    //   [20:24] disk with the start of the central directory
+    //   [24:32] entries on this disk
+    //   [32:40] total entries in the archive
+    //   [40:48] size of the central directory
+    //   [48:56] offset of the central directory
+    let cdir_size = u64::from_le_bytes(raw[40..48].try_into().unwrap());
+    let cdir_offset = u64::from_le_bytes(raw[48..56].try_into().unwrap());
+    let num_entries = u64::from_le_bytes(raw[32..40].try_into().unwrap());
     Ok(Some(Zip64Eocd {
         cdir_size,
         cdir_offset,
@@ -291,6 +324,46 @@ mod tests {
         assert_eq!(
             read_central_dir(&mut src).unwrap_err().code(),
             ZipErrorCode::Nozip
+        );
+    }
+
+    /// The ZIP64 EOCD field offsets must follow the PK\x06\x06 layout:
+    /// cdir_size at [40:48], cdir_offset at [48:56], total entries at [32:40].
+    /// This guards against the off-by-16 regression that made >65535-entry
+    /// archives unreadable (ZIP_ER_INCONS).
+    #[test]
+    fn read_zip64_eocd_correct_field_offsets() {
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&magic::EOCD64); // [0:4]
+        raw.extend_from_slice(&44u64.to_le_bytes()); // [4:12] record size
+        raw.extend_from_slice(&0u32.to_le_bytes()); // [12:16] version made by + needed
+        raw.extend_from_slice(&0u32.to_le_bytes()); // [16:20] number of this disk
+        raw.extend_from_slice(&0u32.to_le_bytes()); // [20:24] disk with start of CD
+        raw.extend_from_slice(&123u64.to_le_bytes()); // [24:32] entries on this disk
+        raw.extend_from_slice(&70000u64.to_le_bytes()); // [32:40] total entries
+        raw.extend_from_slice(&3920000u64.to_le_bytes()); // [40:48] central dir size
+        raw.extend_from_slice(&3080000u64.to_le_bytes()); // [48:56] central dir offset
+
+        let mut src: Box<dyn Source> = Box::new(Cursor::new(raw));
+        let z = read_eocd64(&mut src, 0).unwrap().expect("parse zip64 eocd");
+        assert_eq!(z.cdir_size, 3920000);
+        assert_eq!(z.cdir_offset, 3080000);
+        assert_eq!(z.num_entries, 70000);
+    }
+
+    /// A file that begins with a ZIP signature but has no parseable EOCD is a
+    /// truncated archive (ZIP_ER_TRUNCATED_ZIP = 35), not a non-zip.
+    #[test]
+    fn truncated_pk_prefix_is_truncated_zip() {
+        // First half of a valid archive: local header magic present, but no
+        // central directory / EOCD. Must report 35, matching libzip.
+        let local = [0x50, 0x4B, 0x03, 0x04];
+        let mut bytes = local.to_vec();
+        bytes.extend_from_slice(&[0u8; 4000]);
+        let mut src: Box<dyn Source> = Box::new(Cursor::new(bytes));
+        assert_eq!(
+            read_central_dir(&mut src).unwrap_err().code(),
+            ZipErrorCode::TruncatedZip
         );
     }
 }

@@ -25,8 +25,8 @@ use std::ffi::{c_void, CStr, CString};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use zip_core::{Archive, ArchiveFile, CompressOptions};
 use zip_core::constant::CompressionMethod;
+use zip_core::{Archive, ArchiveFile, CompressOptions};
 
 fn sha256hex(data: &[u8]) -> String {
     let mut h = Sha256::new();
@@ -78,7 +78,8 @@ impl CReadApi {
         let mut out = Vec::new();
         let mut buf = [0u8; 8192];
         loop {
-            let n = unsafe { (self.zip_fread)(fh, buf.as_mut_ptr() as *mut c_void, buf.len() as u64) };
+            let n =
+                unsafe { (self.zip_fread)(fh, buf.as_mut_ptr() as *mut c_void, buf.len() as u64) };
             if n > 0 {
                 out.extend_from_slice(&buf[..n as usize]);
             } else if n == 0 {
@@ -129,7 +130,9 @@ fn c_writes_rust_reads(corpus: &Path) -> Vec<ArchiveCheck> {
         .expect("corpus dir")
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .filter(|p| p.extension().map(|x| x == "zip").unwrap_or(false) && p.parent() == Some(corpus))
+        .filter(|p| {
+            p.extension().map(|x| x == "zip").unwrap_or(false) && p.parent() == Some(corpus)
+        })
         .collect();
     zips.sort();
 
@@ -214,7 +217,10 @@ fn rust_writes_c_reads(api: &CReadApi, corpus: &Path) -> ArchiveCheck {
     let cpath = CString::new(zip_path.to_string_lossy().as_bytes()).unwrap();
     let mut errp: i32 = 0;
     let zh = unsafe { (api.zip_open)(cpath.as_ptr(), 0, &mut errp) };
-    assert!(!zh.is_null(), "C libzip could not open Rust-written archive errp={errp}");
+    assert!(
+        !zh.is_null(),
+        "C libzip could not open Rust-written archive errp={errp}"
+    );
     let num = unsafe { (api.zip_get_num_entries)(zh, 0) };
     assert_eq!(num, files.len() as i64);
 
@@ -224,7 +230,10 @@ fn rust_writes_c_reads(api: &CReadApi, corpus: &Path) -> ArchiveCheck {
         let c_name = if name_ptr.is_null() {
             None
         } else {
-            unsafe { CStr::from_ptr(name_ptr) }.to_str().ok().map(|s| s.to_string())
+            unsafe { CStr::from_ptr(name_ptr) }
+                .to_str()
+                .ok()
+                .map(|s| s.to_string())
         };
         let expected = files[i as usize].data.clone();
         let read = unsafe { api.read_entry(zh, i) }.expect("C fread");
@@ -242,7 +251,9 @@ fn rust_writes_c_reads(api: &CReadApi, corpus: &Path) -> ArchiveCheck {
     }
     unsafe { (api.zip_close)(zh) };
 
-    let all_match = checks.iter().all(|c| c.bytes_match && c.size_match && c.name_match);
+    let all_match = checks
+        .iter()
+        .all(|c| c.bytes_match && c.size_match && c.name_match);
     ArchiveCheck {
         archive: zip_path.display().to_string(),
         num_entries: checks.len(),
@@ -271,5 +282,7 @@ fn main() {
 
     let a_ok = a.iter().all(|x| x.all_match);
     let b_ok = b.all_match;
-    eprintln!("[cross_read] C-writes/Rust-reads all_match={a_ok}, Rust-writes/C-reads all_match={b_ok}");
+    eprintln!(
+        "[cross_read] C-writes/Rust-reads all_match={a_ok}, Rust-writes/C-reads all_match={b_ok}"
+    );
 }

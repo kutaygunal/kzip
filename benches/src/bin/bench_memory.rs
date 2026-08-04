@@ -8,7 +8,9 @@
 //! freed memory (noted as a limitation). Writes `results/benchmark-memory.csv`.
 
 use libzip_benches::capi::CApi;
-use libzip_benches::{build_many_entry_corpus, csv_header, csv_row_wl, median, write_csv, zip_dll_path};
+use libzip_benches::{
+    build_many_entry_corpus, csv_header, csv_row_wl, median, write_csv, zip_dll_path,
+};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::ffi::c_void;
 use std::io::Read;
@@ -80,11 +82,7 @@ struct ProcessMemoryCounters {
 }
 #[link(name = "psapi")]
 unsafe extern "system" {
-    fn GetProcessMemoryInfo(
-        h: *mut c_void,
-        counters: *mut ProcessMemoryCounters,
-        cb: u32,
-    ) -> i32;
+    fn GetProcessMemoryInfo(h: *mut c_void, counters: *mut ProcessMemoryCounters, cb: u32) -> i32;
 }
 #[link(name = "kernel32")]
 unsafe extern "system" {
@@ -112,8 +110,10 @@ fn current_working_set() -> usize {
 }
 
 fn main() {
-    let api = unsafe { CApi::load(Path::new(&zip_dll_path())) }
-        .unwrap_or_else(|e| { eprintln!("load: {e}"); std::process::exit(1); });
+    let api = unsafe { CApi::load(Path::new(&zip_dll_path())) }.unwrap_or_else(|e| {
+        eprintln!("load: {e}");
+        std::process::exit(1);
+    });
     let cver = api.version();
 
     let corpus = build_many_entry_corpus(ENTRY_COUNT);
@@ -213,7 +213,12 @@ fn main() {
                     0,
                     std::ptr::null_mut(),
                 );
-                let idx = (api.zip_file_add)(za, cn.as_ptr(), src, libzip_benches::capi::ZIP_FL_OVERWRITE);
+                let idx = (api.zip_file_add)(
+                    za,
+                    cn.as_ptr(),
+                    src,
+                    libzip_benches::capi::ZIP_FL_OVERWRITE,
+                );
                 let _ = (api.zip_set_file_compression)(
                     za,
                     idx as u64,

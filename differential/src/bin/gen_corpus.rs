@@ -19,8 +19,8 @@
 //!
 //! Usage: `gen_corpus <c-zip-dll> <corpus-dir>`
 
-use libloading::Library;
 use libc::c_int;
+use libloading::Library;
 use std::ffi::{c_void, CString};
 use std::path::{Path, PathBuf};
 
@@ -41,7 +41,8 @@ struct CApi {
     zip_file_set_mtime: unsafe extern "C" fn(*mut ZipT, u64, i64, u32) -> c_int,
     zip_set_archive_comment: unsafe extern "C" fn(*mut ZipT, *const libc::c_char, u16) -> c_int,
     zip_set_archive_flag: unsafe extern "C" fn(*mut ZipT, u32, c_int) -> c_int,
-    zip_file_set_comment: unsafe extern "C" fn(*mut ZipT, u64, *const libc::c_char, u16, u32) -> c_int,
+    zip_file_set_comment:
+        unsafe extern "C" fn(*mut ZipT, u64, *const libc::c_char, u16, u32) -> c_int,
     zip_close: unsafe extern "C" fn(*mut ZipT) -> c_int,
 }
 
@@ -127,7 +128,10 @@ fn generate_with_c(
     let mut errp: c_int = 0;
     let za = unsafe { (api.zip_open)(cpath.as_ptr(), ZIP_CREATE, &mut errp) };
     if za.is_null() {
-        return Err(format!("zip_open create failed for {} errp={errp}", arch.filename));
+        return Err(format!(
+            "zip_open create failed for {} errp={errp}",
+            arch.filename
+        ));
     }
 
     // Keep buffers + names alive until zip_close (freep=0 sources).
@@ -639,7 +643,10 @@ fn main() {
             entries: (0..1500)
                 .map(|i| Entry {
                     name: format!("file_{i:04}.txt"),
-                    data: text(&format!("many entry content number {i} "), 3 + (i % 7) as usize),
+                    data: text(
+                        &format!("many entry content number {i} "),
+                        3 + (i % 7) as usize,
+                    ),
                     method: if i % 2 == 0 { CM_DEFLATE } else { CM_STORE },
                     level: 6,
                     mtime: None,
@@ -676,8 +683,16 @@ fn main() {
     }
 
     // ---- Handcrafted edge cases ----
-    std::fs::write(handcrafted_dir.join("data_descriptor.zip"), handcraft_data_descriptor()).unwrap();
-    std::fs::write(handcrafted_dir.join("extra_fields.zip"), handcraft_extra_fields()).unwrap();
+    std::fs::write(
+        handcrafted_dir.join("data_descriptor.zip"),
+        handcraft_data_descriptor(),
+    )
+    .unwrap();
+    std::fs::write(
+        handcrafted_dir.join("extra_fields.zip"),
+        handcraft_extra_fields(),
+    )
+    .unwrap();
     std::fs::write(handcrafted_dir.join("zip64.zip"), handcraft_zip64()).unwrap();
     std::fs::write(
         handcrafted_dir.join("bad_notzip.zip"),
@@ -688,6 +703,9 @@ fn main() {
     let cut = basic.len() / 2;
     std::fs::write(handcrafted_dir.join("truncated.zip"), &basic[..cut]).unwrap();
 
-    println!("wrote handcrafted edge cases into {}", handcrafted_dir.display());
+    println!(
+        "wrote handcrafted edge cases into {}",
+        handcrafted_dir.display()
+    );
     println!("corpus ready at {}", corpus.display());
 }

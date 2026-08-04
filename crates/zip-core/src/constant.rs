@@ -96,3 +96,14 @@ pub const EXTRA_FIELD_ZIP64: u16 = 0x0001;
 /// Value indicating a 32-bit field is 0xFFFFFFFF and the true value is in the
 /// ZIP64 extra field.
 pub const ZIP64_MAGIC32: u32 = u32::MAX;
+
+/// Encryption method constants, matching libzip's `ZIP_EM_*` values
+/// (`zip.h`). `ZIP_EM_NONE` (0) is what an unencrypted entry reports.
+pub mod encryption {
+    /// No encryption.
+    pub const NONE: u16 = 0;
+    /// Traditional PKWARE encryption.
+    pub const TRAD_PKWARE: u16 = 1;
+    /// Unknown / not determinable encryption method.
+    pub const UNKNOWN: u16 = 0xFFFF;
+}

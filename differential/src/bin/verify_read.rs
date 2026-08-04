@@ -138,7 +138,8 @@ unsafe fn read_all(api: &ZipApi, fh: *mut ZipFileHandle) -> (u64, u64, bool) {
     let mut hasher: u64 = 0xcbf29ce484222325;
     let mut ok = true;
     loop {
-        let nread = unsafe { (api.zip_fread)(fh, buf.as_mut_ptr() as *mut c_void, buf.len() as u64) };
+        let nread =
+            unsafe { (api.zip_fread)(fh, buf.as_mut_ptr() as *mut c_void, buf.len() as u64) };
         if nread > 0 {
             total += nread as u64;
             for &b in &buf[..nread as usize] {
@@ -235,7 +236,11 @@ unsafe fn process_archive(api: &ZipApi, path: &Path) -> ArchiveRecord {
                     let (len, fp, ok) = unsafe { read_all(api, fh) };
                     fopen_len = len;
                     fopen_fnv = Some(format!("{fp:016x}"));
-                    fopen_status = if ok { "ok".into() } else { "read_failed".into() };
+                    fopen_status = if ok {
+                        "ok".into()
+                    } else {
+                        "read_failed".into()
+                    };
                     unsafe { (api.zip_fclose)(fh) };
                 }
             }
@@ -247,7 +252,11 @@ unsafe fn process_archive(api: &ZipApi, path: &Path) -> ArchiveRecord {
                 let (len, fp, ok) = unsafe { read_all(api, fh2) };
                 fopen_index_len = len;
                 fopen_index_fnv = Some(format!("{fp:016x}"));
-                fopen_index_status = if ok { "ok".into() } else { "read_failed".into() };
+                fopen_index_status = if ok {
+                    "ok".into()
+                } else {
+                    "read_failed".into()
+                };
                 unsafe { (api.zip_fclose)(fh2) };
             }
 
@@ -286,14 +295,22 @@ unsafe fn process_archive(api: &ZipApi, path: &Path) -> ArchiveRecord {
 
     let missing = CString::new("no_such_entry_that_never_exists.txt").unwrap();
     let fhm = unsafe { (api.zip_fopen)(zh, missing.as_ptr(), 0) };
-    let err_fopen_missing_status = if fhm.is_null() { "failed".into() } else { "opened".into() };
+    let err_fopen_missing_status = if fhm.is_null() {
+        "failed".into()
+    } else {
+        "opened".into()
+    };
     if !fhm.is_null() {
         unsafe { (api.zip_fclose)(fhm) };
     }
     let err_fopen_missing_strerror = cstr_to_string(unsafe { (api.zip_strerror)(zh) });
 
     let fho = unsafe { (api.zip_fopen_index)(zh, u64::MAX, 0) };
-    let err_fopen_index_oob_status = if fho.is_null() { "failed".into() } else { "opened".into() };
+    let err_fopen_index_oob_status = if fho.is_null() {
+        "failed".into()
+    } else {
+        "opened".into()
+    };
     if !fho.is_null() {
         unsafe { (api.zip_fclose)(fho) };
     }
@@ -352,7 +369,16 @@ fn main() {
     }
 
     let mut out = serde_json::Map::new();
-    out.insert("lib".into(), serde_json::Value::String(format!("libzip/{version}")));
-    out.insert("archives".into(), serde_json::to_value(records).unwrap_or_default());
-    println!("{}", serde_json::to_string_pretty(&serde_json::Value::Object(out)).unwrap());
+    out.insert(
+        "lib".into(),
+        serde_json::Value::String(format!("libzip/{version}")),
+    );
+    out.insert(
+        "archives".into(),
+        serde_json::to_value(records).unwrap_or_default(),
+    );
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::Value::Object(out)).unwrap()
+    );
 }

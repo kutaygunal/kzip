@@ -39,7 +39,8 @@ use zip_core::{Archive, EntryReader, Stat, ZipErrorCode};
 
 /// `zip_stat_t` layout, mirroring libzip's `zip_stat` struct
 /// (`valid`,`name`,`index`,`size`,`comp_size`,`mtime`,`crc`,`comp_method`,
-/// `encryption_method`).
+/// `encryption_method`,`flags`). The trailing `flags` field makes the Rust
+/// struct 60 bytes, matching the C layout for drop-in ABI compatibility.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct zip_stat {
@@ -52,6 +53,7 @@ pub struct zip_stat {
     pub crc: u32,
     pub comp_method: u16,
     pub encryption_method: u16,
+    pub flags: u32,
 }
 
 /// The Rust state behind an opaque `zip_t*`.
@@ -95,22 +97,25 @@ impl ZipFile {
     }
 }
 
-/// Map a zip error code to a short, libzip-style message string.
+/// Map a zip error code to a short, libzip-style message string (matching the
+/// exact strings from libzip's `zip_err_str.c`).
 fn err_str(code: i32) -> &'static str {
     match ZipErrorCode::from_i32(code) {
         ZipErrorCode::Ok => "no error",
-        ZipErrorCode::Noent => "no such file",
+        ZipErrorCode::Noent => "No such file",
         ZipErrorCode::Exists => "file already exists",
         ZipErrorCode::Open => "can't open file",
         ZipErrorCode::Read => "read error",
         ZipErrorCode::Write => "write error",
         ZipErrorCode::Seek => "seek error",
-        ZipErrorCode::Inval => "invalid argument",
+        ZipErrorCode::Inval => "Invalid argument",
         ZipErrorCode::Nozip => "not a zip archive",
         ZipErrorCode::Compnotsupp => "compression method not supported",
         ZipErrorCode::Encrmethnotsupp => "encryption method not supported",
-        ZipErrorCode::Memory => "out of memory",
+        ZipErrorCode::Memory => "malloc failure",
         ZipErrorCode::Internal => "internal error",
+        ZipErrorCode::TruncatedZip => "truncated zip",
+        ZipErrorCode::Eftoolarge => "extra field too large",
         _ => "zip error",
     }
 }
@@ -459,6 +464,7 @@ pub unsafe extern "C" fn zip_stat_init(sb: *mut zip_stat) {
             (*sb).crc = 0;
             (*sb).comp_method = 0;
             (*sb).encryption_method = 0;
+            (*sb).flags = 0;
         }
     }
 }
@@ -484,6 +490,8 @@ fn fill_stat(z: &Zip, stat: &Stat, sb: *mut zip_stat) -> c_int {
         (*sb).crc = stat.crc.unwrap_or(0);
         (*sb).comp_method = stat.comp_method.unwrap_or(0);
         (*sb).encryption_method = stat.encryption_method.unwrap_or(0);
+        // `flags` is reserved-for-future-use in libzip's zip_stat_t and stays 0.
+        (*sb).flags = 0;
     }
     0
 }
@@ -634,6 +642,7 @@ mod tests {
             crc: 0,
             comp_method: 0,
             encryption_method: 0,
+            flags: 0,
         };
         assert_eq!(
             unsafe { zip_stat(zh, CString::new("b.bin").unwrap().as_ptr(), 0, &mut sb) },
@@ -683,6 +692,7 @@ mod tests {
             crc: 0,
             comp_method: 0,
             encryption_method: 0,
+            flags: 0,
         }
     }
 
@@ -739,14 +749,14 @@ mod tests {
         let zh = unsafe { zip_open(cpath.as_ptr(), 0, std::ptr::null_mut()) };
         assert!(!zh.is_null());
 
-        // Missing entry -> NULL handle and a "no such file" strerror.
+        // Missing entry -> NULL handle and a "No such file" strerror.
         let missing = CString::new("nope.txt").unwrap();
         assert!(unsafe { zip_fopen(zh, missing.as_ptr(), 0) }.is_null());
-        assert_eq!(cstr(unsafe { zip_strerror(zh) }), "no such file");
+        assert_eq!(cstr(unsafe { zip_strerror(zh) }), "No such file");
 
         // NULL name -> NULL handle, invalid-argument strerror.
         assert!(unsafe { zip_fopen(zh, std::ptr::null(), 0) }.is_null());
-        assert_eq!(cstr(unsafe { zip_strerror(zh) }), "invalid argument");
+        assert_eq!(cstr(unsafe { zip_strerror(zh) }), "Invalid argument");
 
         // fopen_index out of range -> NULL handle.
         assert!(unsafe { zip_fopen_index(zh, 9999, 0) }.is_null());
@@ -776,8 +786,9 @@ mod tests {
         );
         assert_eq!(sb.comp_method, 8); // deflate
         assert_ne!(sb.crc, 0);
-        assert_ne!(sb.valid, 0);
-        assert_eq!(sb.encryption_method, 0xFFFF); // ZIP_EM_NONE
+        assert_eq!(sb.valid, 0xFF); // the 8 real ZIP_STAT_* bits
+        assert_eq!(sb.encryption_method, 0); // ZIP_EM_NONE
+        assert_eq!(sb.flags, 0);
 
         // by-name stat on b.bin (2048 zeros).
         let mut sb2 = zero_stat();
@@ -805,6 +816,7 @@ mod tests {
             crc: 5,
             comp_method: 5,
             encryption_method: 5,
+            flags: 5,
         };
         unsafe { zip_stat_init(&mut z) };
         assert_eq!(z.valid, 0);
@@ -816,6 +828,7 @@ mod tests {
         assert_eq!(z.crc, 0);
         assert_eq!(z.comp_method, 0);
         assert_eq!(z.encryption_method, 0);
+        assert_eq!(z.flags, 0);
 
         unsafe { zip_close(zh) };
         std::fs::remove_file(&path).ok();

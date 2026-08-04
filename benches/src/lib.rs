@@ -143,7 +143,6 @@ pub fn csv_row(
     format!("{impl_},{version},{run},{bytes},{secs:.6},{mibps:.3}\n")
 }
 
-
 // ---------------------------------------------------------------------------
 // Phase 5 §9.3 benchmark harness: shared corpus builders, the C libzip FFI
 // surface (CApi), and CSV / timing helpers. All corpus builders are
@@ -223,12 +222,8 @@ pub fn csv_row_wl(
     rss: Option<u64>,
 ) -> String {
     match rss {
-        Some(r) => format!(
-            "{impl_},{version},{workload},{run},{bytes},{secs:.6},{mibps:.3},{r}\n"
-        ),
-        None => format!(
-            "{impl_},{version},{workload},{run},{bytes},{secs:.6},{mibps:.3}\n"
-        ),
+        Some(r) => format!("{impl_},{version},{workload},{run},{bytes},{secs:.6},{mibps:.3},{r}\n"),
+        None => format!("{impl_},{version},{workload},{run},{bytes},{secs:.6},{mibps:.3}\n"),
     }
 }
 
@@ -253,8 +248,7 @@ pub mod capi {
     /// Opaque handle to the loaded C libzip.
     pub struct CApi {
         _lib: Library,
-        pub zip_open:
-            unsafe extern "C" fn(*const c_char, i32, *mut i32) -> *mut ZipHandle,
+        pub zip_open: unsafe extern "C" fn(*const c_char, i32, *mut i32) -> *mut ZipHandle,
         pub zip_open_from_source:
             unsafe extern "C" fn(*mut ZipSource, i32, *mut c_void) -> *mut ZipHandle,
         pub zip_close: unsafe extern "C" fn(*mut ZipHandle) -> i32,
@@ -262,18 +256,15 @@ pub mod capi {
         pub zip_get_name: unsafe extern "C" fn(*mut ZipHandle, u64, u32) -> *const c_char,
         pub zip_file_add:
             unsafe extern "C" fn(*mut ZipHandle, *const c_char, *mut ZipSource, u32) -> i64,
-        pub zip_set_file_compression:
-            unsafe extern "C" fn(*mut ZipHandle, u64, i32, u32) -> i32,
+        pub zip_set_file_compression: unsafe extern "C" fn(*mut ZipHandle, u64, i32, u32) -> i32,
         pub zip_source_buffer_create:
             unsafe extern "C" fn(*const c_void, u64, i32, *mut c_void) -> *mut ZipSource,
-        pub zip_fopen:
-            unsafe extern "C" fn(*mut ZipHandle, *const c_char, u32) -> *mut ZipFile,
+        pub zip_fopen: unsafe extern "C" fn(*mut ZipHandle, *const c_char, u32) -> *mut ZipFile,
         pub zip_fopen_index: unsafe extern "C" fn(*mut ZipHandle, u64, u32) -> *mut ZipFile,
         pub zip_fread: unsafe extern "C" fn(*mut ZipFile, *mut c_void, u64) -> i64,
         pub zip_fclose: unsafe extern "C" fn(*mut ZipFile) -> i32,
         pub zip_delete: unsafe extern "C" fn(*mut ZipHandle, u64) -> i32,
-        pub zip_rename:
-            unsafe extern "C" fn(*mut ZipHandle, u64, *const c_char) -> i32,
+        pub zip_rename: unsafe extern "C" fn(*mut ZipHandle, u64, *const c_char) -> i32,
         pub zip_libzip_version: unsafe extern "C" fn() -> *const c_char,
     }
 
@@ -334,8 +325,7 @@ pub unsafe fn c_compress_serial(
 ) -> Result<(f64, f64), String> {
     use std::ffi::{c_void, CString};
     let total_bytes = corpus_size_bytes(files);
-    let cpath =
-        CString::new(out_path.to_string_lossy().as_bytes()).map_err(|e| e.to_string())?;
+    let cpath = CString::new(out_path.to_string_lossy().as_bytes()).map_err(|e| e.to_string())?;
     let mut errp: i32 = 0;
 
     let start = std::time::Instant::now();
@@ -385,4 +375,3 @@ pub fn write_csv(name: &str, content: &str) -> Result<(), String> {
 pub fn zip_dll_path() -> String {
     std::env::var("ZIP_DLL").unwrap_or_else(|_| "libs/c/zip.dll".to_string())
 }
-

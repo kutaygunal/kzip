@@ -8,7 +8,9 @@
 //! Writes `results/benchmark-random.csv`.
 
 use libzip_benches::capi::CApi;
-use libzip_benches::{build_many_entry_corpus, csv_header, csv_row_wl, median, write_csv, zip_dll_path};
+use libzip_benches::{
+    build_many_entry_corpus, csv_header, csv_row_wl, median, write_csv, zip_dll_path,
+};
 use std::ffi::{c_void, CString};
 use std::io::Read;
 use std::path::Path;
@@ -33,8 +35,10 @@ fn sample_indices(seed: u64, n: usize, count: usize) -> Vec<u64> {
 }
 
 fn main() {
-    let api = unsafe { CApi::load(Path::new(&zip_dll_path())) }
-        .unwrap_or_else(|e| { eprintln!("load: {e}"); std::process::exit(1); });
+    let api = unsafe { CApi::load(Path::new(&zip_dll_path())) }.unwrap_or_else(|e| {
+        eprintln!("load: {e}");
+        std::process::exit(1);
+    });
     let cver = api.version();
 
     let corpus = build_many_entry_corpus(ENTRY_COUNT);
@@ -49,7 +53,10 @@ fn main() {
     };
     let bytes = write_archive(&files, &opts).expect("write_archive failed");
     let indices = sample_indices(0xC0FF_EE11_2233_4455, ENTRY_COUNT, SAMPLES);
-    let total_read: u64 = indices.iter().map(|&i| files[i as usize].data.len() as u64).sum();
+    let total_read: u64 = indices
+        .iter()
+        .map(|&i| files[i as usize].data.len() as u64)
+        .sum();
     let arch_path = std::env::temp_dir().join(format!("bench_random_{}.zip", std::process::id()));
     std::fs::write(&arch_path, &bytes).expect("write archive to disk");
 
@@ -61,7 +68,11 @@ fn main() {
         assert!(!za.is_null(), "zip_open failed err={errp}");
         za
     }
-    unsafe fn c_sweep(api: &CApi, za: *mut libzip_benches::capi::ZipHandle, idx: &[u64]) -> (u64, f64) {
+    unsafe fn c_sweep(
+        api: &CApi,
+        za: *mut libzip_benches::capi::ZipHandle,
+        idx: &[u64],
+    ) -> (u64, f64) {
         let t = Instant::now();
         let mut total = 0u64;
         for &i in idx {
@@ -120,8 +131,14 @@ fn main() {
         assert_eq!(total, total_read, "C random read total mismatch");
         c_rates.push(total as f64 / secs / (1024.0 * 1024.0));
         rows.push_str(&csv_row_wl(
-            "c_libzip", &cver, "read_random", run + 1, total, secs,
-            total as f64 / secs / (1024.0 * 1024.0), None,
+            "c_libzip",
+            &cver,
+            "read_random",
+            run + 1,
+            total,
+            secs,
+            total as f64 / secs / (1024.0 * 1024.0),
+            None,
         ));
     }
     unsafe { (api.zip_close)(za) };
@@ -137,8 +154,14 @@ fn main() {
         assert_eq!(total, total_read, "Rust random read total mismatch");
         r_rates.push(total as f64 / secs / (1024.0 * 1024.0));
         rows.push_str(&csv_row_wl(
-            "rust_zip_core", env!("CARGO_PKG_VERSION"), "read_random", run + 1, total, secs,
-            total as f64 / secs / (1024.0 * 1024.0), None,
+            "rust_zip_core",
+            env!("CARGO_PKG_VERSION"),
+            "read_random",
+            run + 1,
+            total,
+            secs,
+            total as f64 / secs / (1024.0 * 1024.0),
+            None,
         ));
     }
 
@@ -150,7 +173,8 @@ fn main() {
 
     eprintln!(
         "read_random ({} samples of {} entries, {:.2} MiB, from file): C {:.1} vs Rust {:.1} MiB/s",
-        SAMPLES, ENTRY_COUNT,
+        SAMPLES,
+        ENTRY_COUNT,
         total_read as f64 / (1024.0 * 1024.0),
         median(c_rates),
         median(r_rates),

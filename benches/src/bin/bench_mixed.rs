@@ -17,8 +17,10 @@ const ITERS: usize = 5;
 const FILE_COUNT: usize = 96;
 
 fn main() {
-    let api = unsafe { CApi::load(Path::new(&zip_dll_path())) }
-        .unwrap_or_else(|e| { eprintln!("load: {e}"); std::process::exit(1); });
+    let api = unsafe { CApi::load(Path::new(&zip_dll_path())) }.unwrap_or_else(|e| {
+        eprintln!("load: {e}");
+        std::process::exit(1);
+    });
     let cver = api.version();
 
     let corpus = build_parallel_corpus(FILE_COUNT);
@@ -67,7 +69,16 @@ fn main() {
                 std::process::exit(1);
             });
         c_mibs.push(mibps);
-        rows.push_str(&csv_row_wl("c_libzip", &cver, "mixed_serial", run + 1, total, secs, mibps, None));
+        rows.push_str(&csv_row_wl(
+            "c_libzip",
+            &cver,
+            "mixed_serial",
+            run + 1,
+            total,
+            secs,
+            mibps,
+            None,
+        ));
     }
     let _ = std::fs::remove_file(&out_path);
 

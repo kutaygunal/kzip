@@ -13,6 +13,7 @@ bytes.workspace = true
 crc32fast.workspace = true
 flate2.workspace = true
 bzip2-rs = "0.1"
+chrono = "0.4"
 rayon = { workspace = true, optional = true }
 
 [features]

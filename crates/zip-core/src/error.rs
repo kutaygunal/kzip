@@ -89,6 +89,10 @@ pub enum ZipErrorCode {
     DataDescriptor = 33,
     /// Zip archive has been destroyed.
     Zipdestroyed = 34,
+    /// Zip archive was truncated (EOCD missing but a zip signature was found).
+    TruncatedZip = 35,
+    /// Extra field is too large.
+    Eftoolarge = 36,
 }
 
 impl ZipErrorCode {
@@ -137,6 +141,8 @@ impl ZipErrorCode {
             32 => Cancelled,
             33 => DataDescriptor,
             34 => Zipdestroyed,
+            35 => TruncatedZip,
+            36 => Eftoolarge,
             _ => Internal,
         }
     }
@@ -218,7 +224,7 @@ mod tests {
 
     #[test]
     fn roundtrip_all_codes() {
-        for i in 0..=34 {
+        for i in 0..=36 {
             let c = ZipErrorCode::from_i32(i);
             assert_eq!(c.as_i32(), i, "mismatch at {i}");
         }

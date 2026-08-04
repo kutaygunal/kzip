@@ -86,7 +86,7 @@ impl Dirent {
         let extra_raw = read_raw(cursor, extra_len)?;
         let comment = read_bytes(cursor, comment_len)?;
 
-        let extra_fields = parse_extra_fields(&extra_raw);
+        let extra_fields = parse_extra_fields(&extra_raw)?;
 
         // ZIP64 overrides for fields whose 32-bit value was the magic.
         let mut comp_size = comp_size32 as u64;
@@ -112,12 +112,12 @@ impl Dirent {
         let comp_method = CompressionMethod::from_u16(comp_method_raw);
         let encryption_method = if bitflags & flag::ENCRYPTED != 0 {
             if bitflags & flag::STRONG_ENCRYPTION != 0 {
-                u16::MAX // unknown strong encryption
+                crate::constant::encryption::UNKNOWN // unknown strong encryption
             } else {
-                0 // ZIP_EM_TRAD_PKWARE
+                crate::constant::encryption::TRAD_PKWARE
             }
         } else {
-            0xFFFF // ZIP_EM_NONE
+            crate::constant::encryption::NONE
         };
 
         Ok(Dirent {
@@ -174,7 +174,7 @@ impl Dirent {
         };
         let header_total = size::LOCAL as u64 + filename_len as u64 + extra_len as u64;
 
-        let extra_fields = parse_extra_fields(&extra_raw);
+        let extra_fields = parse_extra_fields(&extra_raw)?;
         let mut comp_size = comp_size32 as u64;
         let mut uncomp_size = uncomp_size32 as u64;
         if let Some(z64) = zip64_data(&extra_fields) {
@@ -189,9 +189,9 @@ impl Dirent {
 
         let comp_method = CompressionMethod::from_u16(comp_method_raw);
         let encryption_method = if bitflags & flag::ENCRYPTED != 0 {
-            0 // ZIP_EM_TRAD_PKWARE
+            crate::constant::encryption::TRAD_PKWARE
         } else {
-            0xFFFF
+            crate::constant::encryption::NONE
         };
 
         Ok((
@@ -264,7 +264,12 @@ fn read32_from(c: &mut Cursor<&[u8]>) -> Result<u32> {
 }
 
 /// Parse the raw extra-field block into `(id, data)` records.
-fn parse_extra_fields(raw: &[u8]) -> Vec<ExtraField> {
+///
+/// Mirrors libzip's `_zip_ef_parse`: a field whose declared length exceeds the
+/// bytes actually present is a malformed/truncated extra field and yields
+/// `ZIP_ER_INCONS` (matching libzip's strict rejection). Only a trailing tail
+/// shorter than a full (id, len) header is ignored.
+fn parse_extra_fields(raw: &[u8]) -> Result<Vec<ExtraField>> {
     let mut out = Vec::new();
     let mut c = Cursor::new(raw);
     while c.position() + 4 <= raw.len() as u64 {
@@ -272,13 +277,13 @@ fn parse_extra_fields(raw: &[u8]) -> Vec<ExtraField> {
         let len = read16(&mut c) as usize;
         let start = c.position() as usize;
         if start + len > raw.len() {
-            break;
+            return Err(ZipError::new(ZipErrorCode::Incons));
         }
         let data = raw[start..start + len].to_vec();
         c.set_position((start + len) as u64);
         out.push((id, data));
     }
-    out
+    Ok(out)
 }
 
 /// Returns the ZIP64 extra field data (ID 0x0001), if present.

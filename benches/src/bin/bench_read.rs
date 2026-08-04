@@ -7,7 +7,9 @@
 //! from disk). Writes `results/benchmark-read.csv`.
 
 use libzip_benches::capi::CApi;
-use libzip_benches::{build_parallel_corpus, csv_header, csv_row_wl, median, write_csv, zip_dll_path};
+use libzip_benches::{
+    build_parallel_corpus, csv_header, csv_row_wl, median, write_csv, zip_dll_path,
+};
 use std::ffi::{c_void, CString};
 use std::io::Read;
 use std::path::Path;
@@ -18,8 +20,10 @@ const ITERS: usize = 5;
 const FILE_COUNT: usize = 128;
 
 fn main() {
-    let api = unsafe { CApi::load(Path::new(&zip_dll_path())) }
-        .unwrap_or_else(|e| { eprintln!("load: {e}"); std::process::exit(1); });
+    let api = unsafe { CApi::load(Path::new(&zip_dll_path())) }.unwrap_or_else(|e| {
+        eprintln!("load: {e}");
+        std::process::exit(1);
+    });
     let cver = api.version();
 
     // Build the archive bytes once and write to disk.
@@ -96,8 +100,14 @@ fn main() {
         assert_eq!(total, total_uncomp, "C read total mismatch");
         c_mibs.push(total as f64 / secs / (1024.0 * 1024.0));
         rows.push_str(&csv_row_wl(
-            "c_libzip", &cver, "read_full", run + 1, total, secs,
-            total as f64 / secs / (1024.0 * 1024.0), None,
+            "c_libzip",
+            &cver,
+            "read_full",
+            run + 1,
+            total,
+            secs,
+            total as f64 / secs / (1024.0 * 1024.0),
+            None,
         ));
     }
     unsafe { (api.zip_close)(za) };
@@ -122,8 +132,14 @@ fn main() {
         assert_eq!(total, total_uncomp, "Rust read total mismatch");
         r_mibs.push(total as f64 / secs / (1024.0 * 1024.0));
         rows.push_str(&csv_row_wl(
-            "rust_zip_core", env!("CARGO_PKG_VERSION"), "read_full", run + 1, total, secs,
-            total as f64 / secs / (1024.0 * 1024.0), None,
+            "rust_zip_core",
+            env!("CARGO_PKG_VERSION"),
+            "read_full",
+            run + 1,
+            total,
+            secs,
+            total as f64 / secs / (1024.0 * 1024.0),
+            None,
         ));
     }
 

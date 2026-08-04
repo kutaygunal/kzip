@@ -9,7 +9,9 @@
 //! Writes `results/benchmark-modify.csv`.
 
 use libzip_benches::capi::CApi;
-use libzip_benches::{build_parallel_corpus, csv_header, csv_row_wl, median, write_csv, zip_dll_path};
+use libzip_benches::{
+    build_parallel_corpus, csv_header, csv_row_wl, median, write_csv, zip_dll_path,
+};
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::path::Path;
@@ -20,8 +22,10 @@ const ITERS: usize = 5;
 const FILE_COUNT: usize = 64;
 
 fn main() {
-    let api = unsafe { CApi::load(Path::new(&zip_dll_path())) }
-        .unwrap_or_else(|e| { eprintln!("load: {e}"); std::process::exit(1); });
+    let api = unsafe { CApi::load(Path::new(&zip_dll_path())) }.unwrap_or_else(|e| {
+        eprintln!("load: {e}");
+        std::process::exit(1);
+    });
     let cver = api.version();
 
     let corpus = build_parallel_corpus(FILE_COUNT);
@@ -50,12 +54,7 @@ fn main() {
     std::fs::write(&arch_path, &original_bytes).expect("write original archive");
 
     // ---- C in-place modify ----
-    unsafe fn c_modify(
-        api: &CApi,
-        path: &Path,
-        renames: &[(u64, &str)],
-        deletes: &[u64],
-    ) -> f64 {
+    unsafe fn c_modify(api: &CApi, path: &Path, renames: &[(u64, &str)], deletes: &[u64]) -> f64 {
         let cpath = CString::new(path.to_string_lossy().as_bytes()).unwrap();
         let mut errp: i32 = 0;
         let t = Instant::now();

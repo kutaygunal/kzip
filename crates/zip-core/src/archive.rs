@@ -108,7 +108,8 @@ impl Archive {
             crc: Some(d.crc),
             comp_method: Some(method_to_u16(d.comp_method)),
             encryption_method: Some(d.encryption_method),
-            valid: 0xFFFFFFFF,
+            // The 8 real ZIP_STAT_* bits libzip sets, not all 32 bits.
+            valid: 0xFF,
         })
     }
 
@@ -192,32 +193,99 @@ fn method_to_u16(m: CompressionMethod) -> u16 {
 }
 
 /// Convert a DOS date/time to a Unix timestamp (seconds since epoch).
+///
+/// Mirrors libzip's `_zip_d2u_time`, which fills a `struct tm` and passes it
+/// to `mktime` with `tm_isdst = -1`, so the stored DOS fields are interpreted
+/// as LOCAL wall-clock time in the host's timezone (including DST). This
+/// differs from a naive UTC interpretation by the host's UTC offset and DST
+/// state, exactly as C libzip reports.
+///
+/// On Windows `chrono::Local::from_local_datetime` delegates to the C library's
+/// `mktime` (the same primitive libzip uses), so timestamps match libzip on
+/// the same host. On ambiguous/nonexistent local times (DST transitions) we
+/// mirror `mktime`'s deterministic pick where possible and fall back to the
+/// UTC interpretation otherwise.
 fn dos_to_unix(dos_time: u16, dos_date: u16) -> u64 {
-    let secs = (dos_time & 0x1F) as u32 * 2;
-    let mins = ((dos_time >> 5) & 0x3F) as u32;
-    let hours = ((dos_time >> 11) & 0x1F) as u32;
-    let day = (dos_date & 0x1F) as u32;
-    let month = ((dos_date >> 5) & 0x0F) as u32;
-    let year = ((dos_date >> 9) & 0x7F) as u32 + 1980;
-    if year < 1970 || month == 0 || month > 12 || day == 0 {
-        return 0;
+    let secs = (dos_time & 0x1F) as i64 * 2;
+    let mins = ((dos_time >> 5) & 0x3F) as i64;
+    let hours = ((dos_time >> 11) & 0x1F) as i64;
+    let day = (dos_date & 0x1F) as i64;
+    let month = ((dos_date >> 5) & 0x0F) as i64; // 1-based month, may be 0..15
+    let year = ((dos_date >> 9) & 0x7F) as i64 + 1980;
+
+    // libzip's `_zip_d2u_time` fills a `struct tm` (tm_year = year-1900,
+    // tm_mon = month-1, tm_mday = day, ...) and calls `mktime` with
+    // `tm_isdst = -1`. `mktime` NORMALIZES out-of-range fields: a DOS date of
+    // 0/0 (month 0, day 0) becomes 1979-11-30 local, and the result is
+    // interpreted in the host's LOCAL timezone. Reproduce that normalization
+    // so invalid DOS dates and timezone-aware mtimes match libzip.
+    let (y, m, d) = normalize_ymd(year, month, day);
+    use chrono::{Local, NaiveDate, TimeZone};
+    let naive = NaiveDate::from_ymd_opt(y as i32, m as u32, d as u32)
+        .and_then(|date| date.and_hms_opt(hours as u32, mins as u32, secs as u32));
+    let naive = match naive {
+        Some(n) => n,
+        None => return 0,
+    };
+    use chrono::offset::LocalResult;
+    match Local.from_local_datetime(&naive) {
+        LocalResult::Single(t) => t.timestamp() as u64,
+        LocalResult::Ambiguous(a, _) => a.timestamp() as u64,
+        // Non-existent local time (DST spring-forward gap). `mktime` still
+        // yields a value; fall back to the UTC interpretation.
+        LocalResult::None => naive.and_utc().timestamp() as u64,
     }
-    // Days since epoch, via civil-from-days approximation.
-    let days = days_from_civil(year as i64, month as i64, day as i64);
-    if days < 0 {
-        return 0;
-    }
-    (days as u64 * 86400) + (hours as u64 * 3600) + (mins as u64 * 60) + secs as u64
 }
 
-/// Howard Hinnant's `days_from_civil`: days from 1970-01-01.
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146097 + doe - 719468
+/// Normalize a (year, month, day) triple to a valid calendar date the way
+/// `mktime` does: month is 1-based and may be outside [1,12], day may be 0 or
+/// larger than the month's length.
+fn normalize_ymd(mut y: i64, m: i64, d: i64) -> (i64, i64, i64) {
+    // Month: floor-based division handles m == 0 (=> December, previous year).
+    let idx = m - 1;
+    y += idx.div_euclid(12);
+    let mut m = idx.rem_euclid(12) + 1;
+
+    // Day: step back/forward by full months until it fits.
+    let mut d = d;
+    loop {
+        if d < 1 {
+            m -= 1;
+            if m < 1 {
+                m = 12;
+                y -= 1;
+            }
+            d += days_in_month(y, m);
+        } else {
+            let dim = days_in_month(y, m);
+            if d > dim {
+                d -= dim;
+                m += 1;
+                if m > 12 {
+                    m = 1;
+                    y += 1;
+                }
+            } else {
+                break;
+            }
+        }
+    }
+    (y, m, d)
+}
+
+fn days_in_month(y: i64, m: i64) -> i64 {
+    match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 31, // unreachable after month normalization
+    }
 }
 
 #[cfg(test)]
@@ -442,6 +510,99 @@ mod tests {
         assert!(
             a.iter().all(|&b| b == 0xCD),
             "streaming fallback content corrupted"
+        );
+    }
+
+    /// `valid` must be the 8 real ZIP_STAT_* bits (0xFF), and an unencrypted
+    /// entry must report `encryption_method == 0` (ZIP_EM_NONE), both matching
+    /// libzip.
+    #[test]
+    fn stat_valid_and_encryption_match_libzip() {
+        let bytes = build_archive("s.txt", b"payload");
+        let arch = Archive::open(Cursor::new(bytes)).unwrap();
+        let st = arch.stat(0).unwrap();
+        assert_eq!(st.valid, 0xFF);
+        assert_eq!(st.encryption_method, Some(0)); // ZIP_EM_NONE
+        assert_eq!(st.comp_method, Some(0)); // store
+        assert_eq!(st.crc, Some(crc32fast::hash(b"payload")));
+    }
+
+    /// `dos_to_unix` must interpret the stored DOS fields as LOCAL wall-clock
+    /// time (libzip's `mktime`, `tm_isdst = -1`), not as UTC. For a fixed
+    /// non-ambiguous local datetime the result equals chrono's `Local`
+    /// conversion and differs from the naive-UTC value by the host's offset.
+    #[test]
+    fn dos_to_unix_uses_local_timezone_like_mktime() {
+        // DOS 2020-09-13 08:26:40 local wall clock.
+        let dos_time = (8u16 << 11) | (26 << 5) | (40 / 2); // 08:26:40
+        let dos_date = (40u16 << 9) | (9 << 5) | 13; // year=2020(40), month=9, day=13
+
+        let t = dos_to_unix(dos_time, dos_date);
+
+        use chrono::offset::LocalResult;
+        use chrono::{Local, NaiveDate, TimeZone};
+        let naive = NaiveDate::from_ymd_opt(2020, 9, 13)
+            .unwrap()
+            .and_hms_opt(8, 26, 40)
+            .unwrap();
+        let expected = match Local.from_local_datetime(&naive) {
+            LocalResult::Single(x) => x.timestamp() as u64,
+            LocalResult::Ambiguous(a, _) => a.timestamp() as u64,
+            LocalResult::None => naive.and_utc().timestamp() as u64,
+        };
+        assert_eq!(t, expected);
+
+        // On any non-zero-offset host the local interpretation must differ
+        // from the naive-UTC one (matching libzip's timezone-aware mktime).
+        let utc = naive.and_utc().timestamp() as u64;
+        assert_eq!(
+            (t as i64 - utc as i64).abs() % 900,
+            0,
+            "offset must be whole 15-min units"
+        );
+        if expected != utc {
+            assert_ne!(t, utc, "local timezone conversion must differ from UTC");
+        }
+    }
+
+    /// A DOS date of 0/0 (invalid: month 0, day 0) is NORMALIZED by libzip's
+    /// `mktime` to 1979-11-30 local, not mapped to 0. Replicate that.
+    #[test]
+    fn dos_to_unix_zero_date_normalizes_like_mktime() {
+        let t = dos_to_unix(0, 0);
+        use chrono::{Local, NaiveDate, TimeZone};
+        let naive = NaiveDate::from_ymd_opt(1979, 11, 30)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+        let expected = Local
+            .from_local_datetime(&naive)
+            .single()
+            .unwrap()
+            .timestamp() as u64;
+        assert_eq!(t, expected);
+        assert!(t > 300_000_000, "normalized date should be ~1979, not 0");
+    }
+
+    /// Day 0 rolls back to the previous month's last day; month 13 rolls into
+    /// the next year. This mirrors `mktime`'s field normalization.
+    #[test]
+    fn dos_to_unix_rolls_out_of_range_fields() {
+        // DOS 1980-02-01 with day 0 => 1980-01-31.
+        // year bits=0, month bits=2, day=0 => date = (0<<9)|(2<<5)|0 = 64.
+        let t = dos_to_unix(0, 64);
+        use chrono::{Local, NaiveDate, TimeZone};
+        let naive = NaiveDate::from_ymd_opt(1980, 1, 31)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+        assert_eq!(
+            t,
+            Local
+                .from_local_datetime(&naive)
+                .single()
+                .unwrap()
+                .timestamp() as u64
         );
     }
 }

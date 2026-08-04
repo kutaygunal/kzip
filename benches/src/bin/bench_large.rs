@@ -18,8 +18,10 @@ const ITERS: usize = 3;
 const SIZE_MIB: usize = 1024; // 1 GiB
 
 fn main() {
-    let api = unsafe { CApi::load(Path::new(&zip_dll_path())) }
-        .unwrap_or_else(|e| { eprintln!("load: {e}"); std::process::exit(1); });
+    let api = unsafe { CApi::load(Path::new(&zip_dll_path())) }.unwrap_or_else(|e| {
+        eprintln!("load: {e}");
+        std::process::exit(1);
+    });
     let cver = api.version();
 
     let payload = build_large_payload(SIZE_MIB);
@@ -32,8 +34,7 @@ fn main() {
     // C serial single-stream compress.
     unsafe fn c_run(api: &CApi, out_path: &Path, payload: &[u8]) -> (f64, f64) {
         use std::ffi::CString;
-        let cpath =
-            CString::new(out_path.to_string_lossy().as_bytes()).expect("CString path");
+        let cpath = CString::new(out_path.to_string_lossy().as_bytes()).expect("CString path");
         let mut errp: i32 = 0;
         let t = Instant::now();
         let za = (api.zip_open)(cpath.as_ptr(), libzip_benches::capi::ZIP_CREATE, &mut errp);
@@ -46,7 +47,12 @@ fn main() {
             std::ptr::null_mut(),
         );
         assert!(!src.is_null());
-        let idx = (api.zip_file_add)(za, name.as_ptr(), src, libzip_benches::capi::ZIP_FL_OVERWRITE);
+        let idx = (api.zip_file_add)(
+            za,
+            name.as_ptr(),
+            src,
+            libzip_benches::capi::ZIP_FL_OVERWRITE,
+        );
         assert!(idx >= 0);
         let _ = (api.zip_set_file_compression)(
             za,
@@ -72,7 +78,16 @@ fn main() {
         let _ = std::fs::remove_file(&out_path);
         let (secs, mibps) = unsafe { c_run(&api, &out_path, &payload) };
         c_mibs.push(mibps);
-        rows.push_str(&csv_row_wl("c_libzip", &cver, "large", run + 1, total, secs, mibps, None));
+        rows.push_str(&csv_row_wl(
+            "c_libzip",
+            &cver,
+            "large",
+            run + 1,
+            total,
+            secs,
+            mibps,
+            None,
+        ));
     }
     let _ = std::fs::remove_file(&out_path);
 
