@@ -1,0 +1,19 @@
+[package]
+name = "zip-sys"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "C ABI FFI layer exposing zip-core as a libzip-compatible cdylib."
+publish = false
+
+[lib]
+name = "zip"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+zip-core = { path = "../zip-core" }
+libc.workspace = true
+
+[features]
+default = []

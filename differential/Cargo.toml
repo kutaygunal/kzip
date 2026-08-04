@@ -1,0 +1,21 @@
+[package]
+name = "differential"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "C-vs-Rust differential harness: loads a libzip-compatible library and compares behavior."
+publish = false
+
+[[bin]]
+name = "differential"
+path = "src/main.rs"
+
+[dependencies]
+libloading.workspace = true
+libc.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Path to a corpus of .zip files (generated/committed under ../data).
+# The harness opens each, enumerates entries, extracts, and emits a JSON record.

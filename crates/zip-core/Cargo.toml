@@ -1,0 +1,23 @@
+[package]
+name = "zip-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Safe Rust core engine for reading/writing ZIP archives (libzip port)."
+readme = "README.md"
+
+[dependencies]
+thiserror.workspace = true
+bytes.workspace = true
+crc32fast.workspace = true
+flate2.workspace = true
+bzip2-rs = "0.1"
+rayon = { workspace = true, optional = true }
+
+[features]
+default = ["parallel"]
+# Enables parallel compression of independent archive files (rayon).
+parallel = ["dep:rayon"]
+# Pure-Rust deflate backend (miniz_oxide). On by default via flate2 default.
+# Use this if you cannot link native zlib.

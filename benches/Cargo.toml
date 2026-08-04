@@ -1,0 +1,32 @@
+[package]
+name = "libzip-benches"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Criterion benchmarks: parallel compression scaling and zero-copy memory usage, plus C-vs-Rust serial comparison harnesses."
+publish = false
+
+[dependencies]
+zip-core = { path = "../crates/zip-core", features = ["parallel"] }
+libloading.workspace = true
+libc.workspace = true
+
+[[bin]]
+name = "c_serial"
+path = "src/bin/c_serial.rs"
+
+[[bin]]
+name = "rust_serial"
+path = "src/bin/rust_serial.rs"
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "parallel"
+harness = false
+
+[[bench]]
+name = "zerocopy"
+harness = false

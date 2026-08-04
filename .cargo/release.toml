@@ -1,0 +1,21 @@
+# cargo-release configuration — NOTE ON LOCATION.
+#
+# The installed cargo-release is v1.1.3, which reads the flat configuration from
+# the WORKSPACE ROOT `release.toml` (not this file). See `../release.toml`.
+#
+# This `.cargo/release.toml` is kept for two reasons:
+#   1. Historical: pre-1.0 cargo-release (0.24 era) read `.cargo/release.toml`
+#      using `[workspace.release]` / `[[release]]` tables.
+#   2. Tooling that looks for a `.cargo/release.toml` can find a pointer here.
+#
+# Authoritative settings live in `../release.toml`. If you pin an older
+# cargo-release, port the settings there back to this file's `[workspace.release]`
+# table.
+#
+# Summary of the release policy (see ../release.toml and docs/msrv.md):
+#   - shared-version = "workspace"   (all crates version-bumped together)
+#   - sign-commit = false, sign-tag = false  (enable with a GPG/SSH key)
+#   - push-remote = "origin"
+#   - pre-release-commit-message = "chore(release): {{version}}"
+#   - publish = true (default); `publish = false` crates are auto-skipped
+#   - tag name = `v{{version}}` (e.g. v0.1.0); do not also set tag-prefix = "v"

@@ -1,0 +1,15 @@
+[package]
+name = "ziptools"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "zipcmp / zipmerge / ziptool equivalents for conformance testing."
+publish = false
+
+[[bin]]
+name = "zipcmp"
+path = "src/zipcmp.rs"
+
+[dependencies]
+zip-core = { path = "../zip-core" }

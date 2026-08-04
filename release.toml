@@ -1,0 +1,35 @@
+# cargo-release configuration (v1.x). Read from the workspace root by
+# `cargo release` (installed: cargo-release 1.1.3). Install with:
+#   cargo install cargo-release
+#
+# Release flow:
+#   cargo release patch     # 0.1.x -> 0.1.y  (compatible, pre-1.0)
+#   cargo release minor     # 0.1.0 -> 0.2.0  (breaking, pre-1.0)
+#   cargo release major     # 0.x   -> 1.0.0
+#
+# This file is inert during normal `cargo build`/`cargo test`.
+
+# All workspace crates share a single version (`version.workspace = true`), so
+# cargo-release bumps them together and creates one tag.
+shared-version = "workspace"
+
+# Commit/tag signing is OFF by default. Enable with a configured GPG/SSH key:
+#   sign-commit = true
+#   sign-tag = true
+sign-commit = false
+sign-tag = false
+
+# Remote that release tags/commits are pushed to.
+push-remote = "origin"
+
+# Commit message applied when bumping versions and tagging.
+pre-release-commit-message = "chore(release): {{version}}"
+
+# Publish to crates.io by default. Crates whose Cargo.toml sets
+# `publish = false` (zip-async, zip-sys, ziptools, libzip-benches, differential)
+# are automatically skipped; only `zip-core` is publishable at this stage.
+publish = true
+
+# Tag name defaults to `{{prefix}}v{{version}}` with an empty root prefix,
+# i.e. `v0.1.0` / `v1.0.0`. Do NOT set `tag-prefix = "v"` here (it would produce
+# a double `v`). A per-crate prefix is only needed for multi-crate tags.

@@ -1,0 +1,6 @@
+impl,version,run,uncompressed_bytes,seconds,mibps
+rust_zip_core,0.1.0,1,57500074,0.209969,261.164
+rust_zip_core,0.1.0,2,57500074,0.210066,261.044
+rust_zip_core,0.1.0,3,57500074,0.207148,264.720
+rust_zip_core,0.1.0,4,57500074,0.208674,262.784
+rust_zip_core,0.1.0,5,57500074,0.206799,265.167

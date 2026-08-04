@@ -1,0 +1,12 @@
+# book.toml — mdbook configuration for the LibzipInRust book.
+# Build with:  cargo install mdbook && mdbook build
+[book]
+title = "LibzipInRust"
+authors = ["LibzipInRust contributors"]
+language = "en"
+text-direction = "ltr"
+src = "docs"
+
+[output.html]
+git-repository-url = "https://github.com/libzip-in-rust/libzip-in-rust"
+edit-url-template = "https://github.com/libzip-in-rust/libzip-in-rust/edit/main/{path}"

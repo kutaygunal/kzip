@@ -1,0 +1,41 @@
+[package]
+name = "libzip-fuzz"
+version = "0.1.0"
+edition = "2021"
+license = "BSD-3-Clause"
+rust-version = "1.75"
+publish = false
+description = "cargo-fuzz targets for zip-core (no-panic-on-malformed-input posture)."
+
+# Standalone cargo-fuzz project: deliberately excluded from the root workspace
+# so `cargo test/build --workspace` ignore it (cargo-fuzz/libFuzzer are not
+# installed in the standard environment).
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+zip-core = { path = "../crates/zip-core" }
+
+[[bin]]
+name = "fuzz_central_dir"
+path = "fuzz_targets/fuzz_central_dir.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_entry_reader"
+path = "fuzz_targets/fuzz_entry_reader.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_codec"
+path = "fuzz_targets/fuzz_codec.rs"
+test = false
+doc = false
+
+[profile.release]
+debug = 1

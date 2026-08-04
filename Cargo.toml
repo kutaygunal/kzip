@@ -1,0 +1,51 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/zip-core",
+    "crates/zip-async",
+    "crates/zip-sys",
+    "crates/ziptools",
+    "benches",
+    "differential",
+]
+# Benchmark + fuzz targets are registered under their own manifests/features.
+default-members = [
+    "crates/zip-core",
+    "crates/zip-async",
+    "crates/zip-sys",
+    "crates/ziptools",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "BSD-3-Clause"
+authors = ["LibzipInRust contributors"]
+repository = "https://github.com/libzip-in-rust/libzip-in-rust"
+
+[workspace.dependencies]
+libc = "0.2"
+thiserror = "2"
+bytes = "1"
+zerocopy = "0.7"
+flate2 = "1"
+crc32fast = "1"
+rayon = "1"
+tokio = { version = "1", features = ["io-util", "rt-multi-thread", "sync", "macros", "time"] }
+proptest = "1"
+criterion = "0.5"
+libloading = "0.8"
+
+# Profile tuning for release.
+# NOTE: panic = "unwind" (default) so the FFI layer can catch_unwind at the
+# boundary and return a zip error instead of aborting the host process.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+[profile.bench]
+lto = "thin"
+codegen-units = 1
+debug = true

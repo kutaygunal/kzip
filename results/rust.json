@@ -1,0 +1,75 @@
+{
+  "archives": [
+    {
+      "archive": "C:/Users/kutay/Desktop/Projects/LibzipInRust/data/corpus\\binary.zip",
+      "entries": [
+        {
+          "index": 0,
+          "len": 60000,
+          "name": "tmp_bin.bin",
+          "open_status": "ok",
+          "sha256": "01efba6b7b89beea"
+        }
+      ],
+      "num_entries": 1,
+      "open_error": 0
+    },
+    {
+      "archive": "C:/Users/kutay/Desktop/Projects/LibzipInRust/data/corpus\\nested.zip",
+      "entries": [
+        {
+          "index": 0,
+          "len": 900,
+          "name": "sub\\a.txt",
+          "open_status": "ok",
+          "sha256": "22eb95bfe9ce4899"
+        },
+        {
+          "index": 1,
+          "len": 20000,
+          "name": "sub\\deeper\\b.txt",
+          "open_status": "ok",
+          "sha256": "76c703c1b0d29b25"
+        },
+        {
+          "index": 2,
+          "len": 17,
+          "name": "root.txt",
+          "open_status": "ok",
+          "sha256": "537163e4fd941164"
+        }
+      ],
+      "num_entries": 3,
+      "open_error": 0
+    },
+    {
+      "archive": "C:/Users/kutay/Desktop/Projects/LibzipInRust/data/corpus\\text.zip",
+      "entries": [
+        {
+          "index": 0,
+          "len": 5000,
+          "name": "data.txt",
+          "open_status": "ok",
+          "sha256": "5d45fa080be4e345"
+        },
+        {
+          "index": 1,
+          "len": 2,
+          "name": "empty.txt",
+          "open_status": "ok",
+          "sha256": "083cb407b4f40f36"
+        },
+        {
+          "index": 2,
+          "len": 2700,
+          "name": "hello.txt",
+          "open_status": "ok",
+          "sha256": "e9a15d1fb49ece25"
+        }
+      ],
+      "num_entries": 3,
+      "open_error": 0
+    }
+  ],
+  "lib": "libzip/1.11.4"
+}

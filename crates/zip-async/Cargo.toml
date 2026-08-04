@@ -1,0 +1,18 @@
+[package]
+name = "zip-async"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Async streaming adapter for zip-core (tokio)."
+publish = false
+
+[dependencies]
+zip-core = { path = "../zip-core" }
+tokio.workspace = true
+
+[dev-dependencies]
+zip-core = { path = "../zip-core", features = ["parallel"] }
+
+[features]
+default = []

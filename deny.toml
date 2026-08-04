@@ -1,0 +1,59 @@
+# cargo-deny configuration for LibzipInRust.
+# See https://embarkstudios.github.io/cargo-deny/. Applied by the `deny` CI job
+# (`cargo deny check bans|licenses|advisories`).
+#
+# Schema matches cargo-deny 0.20 (installed version). Run locally with:
+#   cargo deny check bans
+#   cargo deny check licenses
+#   cargo deny check advisories
+
+# The dependency graph is only meaningful on supported (tier-1) platforms.
+[graph]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+all-features = true
+
+[bans]
+# Reject duplicate versions of a crate unless explicitly skipped below.
+multiple-versions = "deny"
+# Wildcards from crates.io are banned, but internal path-only workspace deps
+# legitimately omit a version. Relax to warn so those don't trip the check.
+wildcards = "warn"
+# If multiple versions of a crate are ever required, list them here with a
+# justification. Prefer single versions.
+skip = []
+skip-tree = []
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "Unicode-3.0",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "Unlicense",
+]
+# Block a dependency if it carries no discoverable license at all.
+confidence-threshold = 0.8
+
+[advisories]
+db-path = "$CARGO_HOME/advisory-dbs/rust-advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+# Treat yanked crates as a warning (common during active 0.x development).
+yanked = "warn"
+# Error on unmaintained / unsound advisories across the whole workspace graph.
+unmaintained = "all"
+unsound = "all"
+
+[sources]
+# All dependencies must come from crates.io or the workspace itself.
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

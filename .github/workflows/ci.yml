@@ -1,0 +1,143 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    # Also run on version tags so the release job below fires for `v*` tags.
+    tags: ['v*']
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  check:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+      - run: cargo test --workspace --release
+
+  docs:
+    name: docs (missing-docs)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace
+
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions-rust-lang/audit@v1
+
+  fuzz-smoke:
+    # libFuzzer-free no-panic smoke: the cargo-fuzz targets in fuzz/ are
+    # standalone (libfuzzer-sys is not installed here), so we exercise the same
+    # posture via the robustness tests in zip-core.
+    name: fuzz smoke (robustness)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p zip-core --test robustness
+
+  deny:
+    # cargo-deny (bans / licenses / advisories). Uses the cargo-deny action,
+    # which installs the tool; requires network (as in normal CI). If the tool
+    # cannot be installed the job fails loudly rather than silently skipping.
+    name: cargo deny
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        checks: [bans, licenses, advisories]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cargo-deny/deny@v1
+        with:
+          command: check
+          arguments: --manifest-path Cargo.toml ${{ matrix.checks }}
+
+  rdme:
+    # Ensures crates/zip-core/README.md stays in sync with the crate-level doc
+    # comment in src/lib.rs (via cargo-rdme, stable-only / no nightly needed).
+    name: README sync (cargo-rdme)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-rdme
+      - run: cd crates/zip-core && cargo rdme --check
+
+  # OPT-IN Miri (undefined-behavior detection). Runs only when a maintainer
+  # pushes a branch/PR with the label `miri` (or manually dispatches). Requires
+  # `cargo install miri` + the nightly toolchain. Intentionally not in the
+  # default path because it is slow and requires the nightly component.
+  miri:
+    name: miri (opt-in)
+    runs-on: ubuntu-latest
+    if: contains(github.event.pull_request.labels.*.name, 'miri')
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          cargo +nightly install miri
+          cargo +nightly miri test -p zip-core --lib
+
+  # OPTIONAL release job — INERT by default.
+  #
+  # Runs ONLY when a `v*` tag is pushed. It requires the `release` GitHub
+  # environment (which you must create and set `CRATES_IO_TOKEN` in; the job
+  # blocks on environment approval before any step runs). Without a token it
+  # falls back to a `cargo release` dry-run, so it can never publish by accident.
+  release:
+    name: release (cargo-release, tags)
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-release
+        run: cargo install cargo-release
+      - name: Publish (dry-run when CRATES_IO_TOKEN is unset)
+        env:
+          CRATES_IO_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+        run: |
+          if [ -n "${CRATES_IO_TOKEN}" ]; then
+            cargo release publish --no-verify --execute
+          else
+            echo "CRATES_IO_TOKEN not configured; running a safe dry-run."
+            cargo release --dry-run
+          fi
+

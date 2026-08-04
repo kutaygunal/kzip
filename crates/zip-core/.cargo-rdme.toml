@@ -1,0 +1,14 @@
+# cargo-rdme configuration: README.md is generated from the crate-level doc
+# comment in src/lib.rs.
+#
+# Usage:
+#   cargo install cargo-rdme
+#   (cd crates/zip-core && cargo rdme --check)   # verify in CI
+#   (cd crates/zip-core && cargo rdme)           # regenerate README.md
+
+# The default entrypoint (src/lib.rs) and readme path (from Cargo.toml) are used.
+
+[intralinks]
+# Resolving intralinks requires a nightly rustdoc toolchain. Stripping avoids
+# that so the README builds on stable only; crate docs keep full intra-doc links.
+strip-links = true
