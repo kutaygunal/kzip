@@ -80,9 +80,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v1
         with:
-          command: check
+          command: check ${{ matrix.checks }}
           manifest-path: Cargo.toml
-          arguments: ${{ matrix.checks }}
 
   rdme:
     # Ensures crates/zip-core/README.md stays in sync with the crate-level doc

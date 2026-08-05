@@ -23,7 +23,11 @@ libs/c/*.lib
 Thumbs.db
 
 # Temp data used to generate corpus
+# NOTE: tmp_bin.bin is intentionally kept in-tree: crates/zip-core/tests/corpus.rs
+# compares the committed data/corpus/binary.zip entry against it, so it must be
+# present on CI. The other tmp_* files are throwaway corpus-generation inputs.
 data/tmp_*
+!data/tmp_bin.bin
 
 # Original C libzip source clone (reference/build input; vendored separately)
 /libzip/
