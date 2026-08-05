@@ -27,7 +27,14 @@ multiple-versions = "deny"
 wildcards = "warn"
 # If multiple versions of a crate are ever required, list them here with a
 # justification. Prefer single versions.
-skip = []
+skip = [
+  # syn 3 is required by zerocopy-derive 0.8.55; syn 2 is pulled transitively
+  # via chrono -> iana-time-zone -> windows -> windows-implement/interface.
+  # Both major lines are pinned independently by their consumers, so neither
+  # can be unified without forcing a breaking dependency upgrade downstream.
+  { name = "syn", version = "2.0.119" },
+  { name = "syn", version = "3.0.3" },
+]
 skip-tree = []
 
 [licenses]
