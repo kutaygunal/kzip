@@ -97,26 +97,57 @@ impl ZipFile {
     }
 }
 
-/// Map a zip error code to a short, libzip-style message string (matching the
-/// exact strings from libzip's `zip_err_str.c`).
+/// Map a zip error code to the EXACT message string libzip returns for it
+/// (byte-for-byte from libzip's `_zip_err_str[]` in `zip_err_str.c`, indexed by
+/// error code). Sentence-case and wording must match the C baseline so the
+/// differential harness's `zip_strerror` output is identical.
+///
+/// Matching on the raw integer (like libzip's table) keeps this self-contained
+/// and independent of the `ZipErrorCode` enum, so it stays correct even as
+/// new codes are added. Codes 37/38 are zip-bomb guards added by the Rust port
+/// (not present in libzip); they get clear, sentence-case messages.
 fn err_str(code: i32) -> &'static str {
-    match ZipErrorCode::from_i32(code) {
-        ZipErrorCode::Ok => "no error",
-        ZipErrorCode::Noent => "No such file",
-        ZipErrorCode::Exists => "file already exists",
-        ZipErrorCode::Open => "can't open file",
-        ZipErrorCode::Read => "read error",
-        ZipErrorCode::Write => "write error",
-        ZipErrorCode::Seek => "seek error",
-        ZipErrorCode::Inval => "Invalid argument",
-        ZipErrorCode::Nozip => "not a zip archive",
-        ZipErrorCode::Compnotsupp => "compression method not supported",
-        ZipErrorCode::Encrmethnotsupp => "encryption method not supported",
-        ZipErrorCode::Memory => "malloc failure",
-        ZipErrorCode::Internal => "internal error",
-        ZipErrorCode::TruncatedZip => "truncated zip",
-        ZipErrorCode::Eftoolarge => "extra field too large",
-        _ => "zip error",
+    match code {
+        0 => "No error",
+        1 => "Multi-disk zip archives not supported",
+        2 => "Renaming temporary file failed",
+        3 => "Closing zip archive failed",
+        4 => "Seek error",
+        5 => "Read error",
+        6 => "Write error",
+        7 => "CRC error",
+        8 => "Containing zip archive was closed",
+        9 => "No such file",
+        10 => "File already exists",
+        11 => "Can't open file",
+        12 => "Failure to create temporary file",
+        13 => "Zlib error",
+        14 => "Malloc failure",
+        15 => "Entry has been changed",
+        16 => "Compression method not supported",
+        17 => "Premature end of file",
+        18 => "Invalid argument",
+        19 => "Not a zip archive",
+        20 => "Internal error",
+        21 => "Zip archive inconsistent",
+        22 => "Can't remove file",
+        23 => "Entry has been deleted",
+        24 => "Encryption method not supported",
+        25 => "Read-only archive",
+        26 => "No password provided",
+        27 => "Wrong password provided",
+        28 => "Operation not supported",
+        29 => "Resource still in use",
+        30 => "Tell error",
+        31 => "Compressed data invalid",
+        32 => "Operation cancelled",
+        33 => "Unexpected length of data",
+        34 => "Not allowed in torrentzip",
+        35 => "Possibly truncated or corrupted zip archive",
+        36 => "Extra fields too large",
+        37 => "Decompressed data exceeds the size limit",
+        38 => "Central directory too large",
+        _ => "Internal error",
     }
 }
 
@@ -133,6 +164,17 @@ fn guarded<T>(f: impl FnOnce() -> Result<T, i32>, on_panic: T) -> T {
 
 /// Convenience alias for handle pointers we hand back to C.
 type H = *mut c_void;
+
+/// Upper bound (bytes) on the whole-file read performed by [`zip_open`].
+///
+/// `zip_open` reads the entire archive into an in-memory contiguous buffer so
+/// the handle can be shared across threads without racing an OS file-position
+/// pointer. This bound prevents a huge or malicious file from triggering an
+/// unbounded allocation; a file larger than this is rejected with a clear
+/// error instead of being read. 2 GiB comfortably covers every archive in the
+/// differential corpus (largest is ~8 MiB) and any realistic zip, while still
+/// bounding the allocation.
+pub const MAX_OPEN_FILE_SIZE: u64 = 2 * 1024 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Archive lifecycle
@@ -162,10 +204,17 @@ pub unsafe extern "C" fn zip_open(path: *const c_char, _flags: c_int, errorp: *m
         }
         let cpath = unsafe { CStr::from_ptr(path) };
         let path = cpath.to_str().map_err(|_| ZipErrorCode::Inval.as_i32())?;
-        let mut file = std::fs::File::open(path).map_err(|_| ZipErrorCode::Open.as_i32())?;
+        let file = std::fs::File::open(path).map_err(|_| ZipErrorCode::Open.as_i32())?;
+        // Bound the whole-file read so a huge/malicious file cannot cause an
+        // unbounded allocation. Read at most MAX_OPEN_FILE_SIZE+1 bytes; if we
+        // got more than the cap, reject the archive with a clear error.
         let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)
+        file.take(MAX_OPEN_FILE_SIZE + 1)
+            .read_to_end(&mut bytes)
             .map_err(|_| ZipErrorCode::Read.as_i32())?;
+        if bytes.len() as u64 > MAX_OPEN_FILE_SIZE {
+            return Err(ZipErrorCode::Memory.as_i32());
+        }
         let archive = Archive::open(std::io::Cursor::new(bytes)).map_err(|e| e.code().as_i32())?;
         let names = (0..archive.len())
             .map(|i| archive.name(i).and_then(|n| CString::new(n).ok()))
@@ -572,6 +621,84 @@ pub extern "C" fn zip_libzip_version() -> *const c_char {
 mod tests {
     use super::*;
     use zip_core::{write_archive, ArchiveFile, CompressOptions};
+
+    /// `err_str` must return the EXACT libzip message string (sentence-case,
+    /// wording, capitalization) for every error code, matching libzip's
+    /// `_zip_err_str[]` in `zip_err_str.c`. This is the parity the migration
+    /// audit flagged as missing (NOZIP/TRUNCATED_ZIP/EF_TOO_LARGE/OPEN/INCONS
+    /// were wrong or fell through to a generic `"zip error"`).
+    #[test]
+    fn err_str_matches_libzip_exactly() {
+        // code -> libzip `_zip_err_str[]` string (indexed by error code).
+        let expected: &[(i32, &str)] = &[
+            (0, "No error"),
+            (1, "Multi-disk zip archives not supported"),
+            (2, "Renaming temporary file failed"),
+            (3, "Closing zip archive failed"),
+            (4, "Seek error"),
+            (5, "Read error"),
+            (6, "Write error"),
+            (7, "CRC error"),
+            (8, "Containing zip archive was closed"),
+            (9, "No such file"),
+            (10, "File already exists"),
+            (11, "Can't open file"),
+            (12, "Failure to create temporary file"),
+            (13, "Zlib error"),
+            (14, "Malloc failure"),
+            (15, "Entry has been changed"),
+            (16, "Compression method not supported"),
+            (17, "Premature end of file"),
+            (18, "Invalid argument"),
+            (19, "Not a zip archive"),
+            (20, "Internal error"),
+            (21, "Zip archive inconsistent"),
+            (22, "Can't remove file"),
+            (23, "Entry has been deleted"),
+            (24, "Encryption method not supported"),
+            (25, "Read-only archive"),
+            (26, "No password provided"),
+            (27, "Wrong password provided"),
+            (28, "Operation not supported"),
+            (29, "Resource still in use"),
+            (30, "Tell error"),
+            (31, "Compressed data invalid"),
+            (32, "Operation cancelled"),
+            (33, "Unexpected length of data"),
+            (34, "Not allowed in torrentzip"),
+            (35, "Possibly truncated or corrupted zip archive"),
+            (36, "Extra fields too large"),
+            // Rust-port zip-bomb guards (not in libzip's table).
+            (37, "Decompressed data exceeds the size limit"),
+            (38, "Central directory too large"),
+        ];
+        for &(code, want) in expected {
+            assert_eq!(
+                err_str(code),
+                want,
+                "err_str({code}) must match libzip exactly"
+            );
+        }
+    }
+
+    /// `zip_open` must reject a file larger than `MAX_OPEN_FILE_SIZE` with a
+    /// clear error instead of performing an unbounded whole-file read.
+    #[test]
+    fn zip_open_rejects_oversized_file() {
+        let path = temp_path("oversize");
+        // Write a sparse file larger than the cap (no real disk usage).
+        let f = std::fs::File::create(&path).unwrap();
+        f.set_len(MAX_OPEN_FILE_SIZE + 1).unwrap();
+        drop(f);
+
+        let cpath = CString::new(path.to_string_lossy().as_bytes()).unwrap();
+        let mut errp: c_int = 0;
+        let zh = unsafe { zip_open(cpath.as_ptr(), 0, &mut errp) };
+        assert!(zh.is_null(), "oversized file must be rejected");
+        assert_eq!(errp, ZipErrorCode::Memory.as_i32());
+
+        std::fs::remove_file(&path).ok();
+    }
 
     /// Build a small zip in a temp file and return its path.
     fn build_zip(path: &std::path::Path) {

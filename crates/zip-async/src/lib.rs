@@ -142,7 +142,7 @@ impl AsyncEntryReader {
         let n = match res {
             Ok(n) => n,
             Err(e) => {
-                *self.inner.lock().expect("lock") = None;
+                *self.inner.lock().unwrap_or_else(|e| e.into_inner()) = None;
                 self.pending = None;
                 return Poll::Ready(Err(e));
             }
@@ -152,13 +152,13 @@ impl AsyncEntryReader {
         self.staging = staging;
         if n == 0 {
             // EOF: the reader is exhausted; drop it and report clean EOF.
-            *self.inner.lock().expect("lock") = None;
+            *self.inner.lock().unwrap_or_else(|e| e.into_inner()) = None;
             self.staging.clear();
             return Poll::Ready(Ok(()));
         }
         // Keep the reader for the next chunk.
         self.staging.truncate(n);
-        *self.inner.lock().expect("lock") = Some(reader);
+        *self.inner.lock().unwrap_or_else(|e| e.into_inner()) = Some(reader);
         Poll::Ready(Ok(()))
     }
 }
@@ -184,7 +184,7 @@ impl AsyncRead for AsyncEntryReader {
                     },
                     Poll::Ready(Err(_)) => {
                         this.pending = None;
-                        *this.inner.lock().expect("lock") = None;
+                        *this.inner.lock().unwrap_or_else(|e| e.into_inner()) = None;
                         return Poll::Ready(Err(io::Error::other(
                             "blocking decode task cancelled",
                         )));
@@ -196,7 +196,7 @@ impl AsyncRead for AsyncEntryReader {
             if buf.remaining() == 0 {
                 return Poll::Ready(Ok(()));
             }
-            let reader = match this.inner.lock().expect("lock").take() {
+            let reader = match this.inner.lock().unwrap_or_else(|e| e.into_inner()).take() {
                 Some(r) => r,
                 None => return Poll::Ready(Ok(())), // EOF
             };
@@ -309,6 +309,31 @@ mod tests {
         let mut out = Vec::new();
         r.read_to_end(&mut out).await.unwrap();
         assert_eq!(out, vec![9u8; 5000]);
+    }
+
+    #[tokio::test]
+    async fn poisoned_mutex_does_not_panic() {
+        // A poisoned internal mutex must not cause a panic on read: the
+        // non-panicking `unwrap_or_else(|e| e.into_inner())` recovery takes
+        // over and the reader still serves the full, correct content.
+        let files = vec![ArchiveFile::new(
+            "a.txt",
+            b"poison test payload ".repeat(100),
+        )];
+        let bytes = write_archive(&files, &CompressOptions::default()).unwrap();
+        let arch = AsyncArchive::from_bytes(bytes).await.unwrap();
+        let mut r = arch.open_reader(0).await.unwrap();
+
+        // Poison the internal mutex by panicking while holding its guard.
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = r.inner.lock().unwrap();
+            panic!("poison the mutex");
+        });
+
+        // Reading must not panic; it recovers the poisoned mutex and reads fine.
+        let mut out = Vec::new();
+        r.read_to_end(&mut out).await.unwrap();
+        assert_eq!(out, b"poison test payload ".repeat(100));
     }
 
     #[tokio::test]
