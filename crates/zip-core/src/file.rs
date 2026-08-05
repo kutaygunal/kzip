@@ -8,7 +8,7 @@
 use crate::bufferpool::BufferPool;
 use crate::codec::Decoder;
 use crate::constant::CompressionMethod;
-use crate::error::{Result, ZipError, ZipErrorCode};
+use crate::error::Result;
 use crate::source::Source;
 use std::io::{self, Read};
 use std::sync::{Arc, Mutex};
@@ -69,18 +69,17 @@ impl std::fmt::Debug for EntryReader {
 
 impl EntryReader {
     /// Build an `EntryReader` over `src` (positioned at the entry's data start).
+    ///
+    /// For an encrypted entry, `src` must already be a decrypting source (the
+    /// 12-byte encryption header consumed and verified by the caller); the
+    /// decrypted compressed bytes are then decompressed here.
     pub fn new(
         src: Box<dyn Source>,
         method: CompressionMethod,
         comp_size: u64,
         uncomp_size: u64,
         expected_crc: u32,
-        encrypted: bool,
     ) -> Result<EntryReader> {
-        if encrypted {
-            // Decryption (PKWARE / WinZip AES) arrives in a later phase.
-            return Err(ZipError::new(ZipErrorCode::Encrmethnotsupp));
-        }
         let inner = Decoder::new(src, method, comp_size)?;
         Ok(EntryReader {
             inner: Inner::Streaming(inner),
@@ -262,7 +261,6 @@ mod tests {
             clen,
             data.len() as u64,
             crc(&data),
-            false,
         )
         .unwrap();
         let mut out = Vec::new();
@@ -283,7 +281,6 @@ mod tests {
             clen,
             data.len() as u64,
             0xDEADBEEF,
-            false,
         )
         .unwrap();
         let mut out = Vec::new();
@@ -299,17 +296,11 @@ mod tests {
         let src: Box<dyn Source> = Box::new(Cursor::new(comp));
         // Wrong expected size.
         let mut r =
-            EntryReader::new(src, CompressionMethod::Deflate, clen, 999, crc(data), false).unwrap();
+            EntryReader::new(src, CompressionMethod::Deflate, clen, 999, crc(data)).unwrap();
         let mut out = Vec::new();
         assert!(r.read_to_end(&mut out).is_err());
     }
 
-    #[test]
-    fn encrypted_is_rejected() {
-        let src: Box<dyn Source> = Box::new(Cursor::new(vec![0u8; 4]));
-        let e = EntryReader::new(src, CompressionMethod::Store, 0, 0, 0, true).unwrap_err();
-        assert_eq!(e.code(), ZipErrorCode::Encrmethnotsupp);
-    }
 
     /// A buffered reader supports seeking; a seeked reader skips the
     /// end-of-stream integrity check (it may no longer span the full entry).

@@ -198,6 +198,16 @@ zip_file_t *zip_fopen(zip_t *, const char *name, zip_flags_t flags);
 /* Open entry `index` for reading. */
 zip_file_t *zip_fopen_index(zip_t *, zip_uint64_t index, zip_flags_t flags);
 
+/* Open entry `name` for reading, decrypting with `password`. Returns an
+ * opaque handle or NULL. Must be released with zip_fclose. */
+zip_file_t *zip_fopen_encrypted(zip_t *, const char *name, zip_flags_t flags,
+                                const char *password);
+
+/* Open entry `index` for reading, decrypting with `password`. */
+zip_file_t *zip_fopen_index_encrypted(zip_t *, zip_uint64_t index,
+                                      zip_flags_t flags,
+                                      const char *password);
+
 /* Read up to `nbytes` bytes. Returns bytes read, 0 at EOF, or -1 on error. */
 zip_int64_t zip_fread(zip_file_t *, void *buf, zip_uint64_t nbytes);
 
@@ -225,6 +235,19 @@ int zip_stat_index(zip_t *, zip_uint64_t index, zip_flags_t flags,
 
 /* Zero-initialize a zip_stat_t. */
 void zip_stat_init(zip_stat_t *sb);
+
+/* ---- encryption ---- */
+
+/* Set the default password used to decrypt encrypted entries (and to encrypt
+ * on write). Returns 0 or -1. */
+int zip_set_default_password(zip_t *, const char *password);
+
+/* Set the encryption method for entry `index` (applied on zip_close).
+ * ZIP_EM_NONE (0) and ZIP_EM_TRAD_PKWARE (1) are supported. Returns 0 or -1. */
+int zip_file_set_encryption(zip_t *, zip_uint64_t index, zip_uint16_t method);
+
+/* Traditional PKWARE (ZipCrypto) encryption method value. */
+#define ZIP_EM_TRAD_PKWARE 1u
 
 /* ---- write / edit path ---- */
 

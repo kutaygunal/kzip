@@ -7,9 +7,11 @@ use crate::bufferpool::BufferPool;
 use crate::cdir::read_central_dir;
 use crate::codec::decode_slice_into;
 use crate::constant::{CompressionMethod, BUFFER_POOL_CAPACITY, ZERO_COPY_MAX_UNCOMP};
+use crate::crypto::{DecryptingSource, ZipCrypto, ENCRYPTION_HEADER_LEN};
 use crate::dirent::Dirent;
 use crate::error::{Result, ZipError, ZipErrorCode};
 use crate::file::EntryReader;
+use crate::reader;
 use crate::source::{Source, Stat};
 use std::io::{Read, SeekFrom};
 use std::sync::{Arc, Mutex};
@@ -27,6 +29,10 @@ pub struct Archive {
     /// Reusable decode buffers for the zero-copy read path, shared with the
     /// `EntryReader`s it produces.
     pool: Arc<Mutex<BufferPool>>,
+    /// Default password used to decrypt encrypted entries (set via
+    /// `set_default_password`). Interior-mutable so it can be set on a shared
+    /// `&Archive` (the FFI layer holds the archive behind a shared reference).
+    password: Mutex<Option<Vec<u8>>>,
 }
 
 impl std::fmt::Debug for Archive {
@@ -50,6 +56,7 @@ impl Archive {
             comment: cd.comment,
             is_zip64: cd.is_zip64,
             pool: Arc::new(Mutex::new(BufferPool::new(BUFFER_POOL_CAPACITY))),
+            password: Mutex::new(None),
         })
     }
 
@@ -113,13 +120,37 @@ impl Archive {
         })
     }
 
-    /// Open a streaming reader for the entry at `index` (decompressed).
+    /// Set the default password used to decrypt encrypted entries.
+    ///
+    /// This is the Rust-side equivalent of libzip's `zip_set_default_password`.
+    /// A per-entry password passed to [`Archive::open_entry_with_password`] /
+    /// [`Archive::read_entry_with_password`] takes precedence over this default.
+    pub fn set_default_password(&self, password: &[u8]) {
+        *self.password.lock().unwrap_or_else(|e| e.into_inner()) = Some(password.to_vec());
+    }
+
+    /// Open a streaming reader for the entry at `index` (decompressed), using
+    /// the archive's default password for encrypted entries.
     pub fn open_entry(&self, index: u64) -> Result<EntryReader> {
         let d = self
             .entries
             .get(index as usize)
             .ok_or_else(|| ZipError::new(ZipErrorCode::Inval))?;
-        self.open_dirent(d)
+        self.open_dirent(d, None)
+    }
+
+    /// Open a streaming reader for the entry at `index`, using `password` for
+    /// encrypted entries. `None` falls back to the archive's default password.
+    pub fn open_entry_with_password(
+        &self,
+        index: u64,
+        password: Option<&[u8]>,
+    ) -> Result<EntryReader> {
+        let d = self
+            .entries
+            .get(index as usize)
+            .ok_or_else(|| ZipError::new(ZipErrorCode::Inval))?;
+        self.open_dirent(d, password)
     }
 
     /// Open a streaming reader for the first entry named `name`.
@@ -131,7 +162,7 @@ impl Archive {
     }
 
     /// Read the full decompressed content of the entry at `index` into a
-    /// `Vec`.
+    /// `Vec`, using the archive's default password for encrypted entries.
     ///
     /// This verifies the entry's CRC and size (via the streaming reader) and
     /// returns the verified bytes. The FFI layer uses it to serve entries as
@@ -143,7 +174,20 @@ impl Archive {
         Ok(out)
     }
 
-    fn open_dirent(&self, d: &Dirent) -> Result<EntryReader> {
+    /// Read the full decompressed content of the entry at `index`, using
+    /// `password` for encrypted entries. `None` falls back to the default.
+    pub fn read_entry_with_password(
+        &self,
+        index: u64,
+        password: Option<&[u8]>,
+    ) -> Result<Vec<u8>> {
+        let mut r = self.open_entry_with_password(index, password)?;
+        let mut out = Vec::new();
+        r.read_to_end(&mut out)?;
+        Ok(out)
+    }
+
+    fn open_dirent(&self, d: &Dirent, password: Option<&[u8]>) -> Result<EntryReader> {
         let mut dup = self.src.duplicate()?;
         dup.seek(SeekFrom::Start(d.offset))
             .map_err(|e| ZipError::with_system(ZipErrorCode::Seek, e))?;
@@ -192,7 +236,41 @@ impl Archive {
         // Streaming fallback: non-contiguous source (e.g. a real file), an
         // entry that is encrypted/unsupported, or one above the zero-copy size
         // cap.
-        EntryReader::new(dup, method, comp_size, uncomp_size, crc, encrypted)
+        if encrypted {
+            // Only traditional PKWARE (ZipCrypto) is supported in this phase.
+            if d.encryption_method != crate::constant::encryption::TRAD_PKWARE {
+                return Err(ZipError::new(ZipErrorCode::Encrmethnotsupp));
+            }
+            // Resolve the password: explicit override, else the default.
+            let pw: Vec<u8> = match password {
+                Some(p) => p.to_vec(),
+                None => {
+                    let guard = self.password.lock().unwrap_or_else(|e| e.into_inner());
+                    match guard.as_ref() {
+                        Some(p) => p.clone(),
+                        None => return Err(ZipError::new(ZipErrorCode::Nopasswd)),
+                    }
+                }
+            };
+            // Read and decrypt the 12-byte encryption header, then verify the
+            // final byte against the high byte of the entry CRC.
+            let mut header = [0u8; ENCRYPTION_HEADER_LEN];
+            reader::read_exact(&mut dup, &mut header)?;
+            let mut crypto = ZipCrypto::new(&pw);
+            crypto.decrypt(&mut header);
+            if header[ENCRYPTION_HEADER_LEN - 1] != (crc >> 24) as u8 {
+                return Err(ZipError::new(ZipErrorCode::Wrongpasswd));
+            }
+            if comp_size < ENCRYPTION_HEADER_LEN as u64 {
+                return Err(ZipError::new(ZipErrorCode::TruncatedZip));
+            }
+            // The remaining encrypted bytes are the compressed data.
+            let data_comp_size = comp_size - ENCRYPTION_HEADER_LEN as u64;
+            let dec = DecryptingSource::new(dup, crypto);
+            return EntryReader::new(Box::new(dec), method, data_comp_size, uncomp_size, crc);
+        }
+
+        EntryReader::new(dup, method, comp_size, uncomp_size, crc)
     }
 }
 
@@ -633,5 +711,146 @@ mod tests {
                 .unwrap()
                 .timestamp() as u64
         );
+    }
+
+    // ---- Phase 1: ZipCrypto (traditional PKWARE) encryption ----
+
+    /// Build a ZipCrypto-encrypted archive with `password` for every entry.
+    fn encrypted_archive(files: &[(&str, Vec<u8>)], password: &[u8]) -> Vec<u8> {
+        let afiles = files
+            .iter()
+            .map(|(n, d)| ArchiveFile::new(*n, d.clone()))
+            .collect::<Vec<_>>();
+        let opts = CompressOptions::default();
+        let encrypt = vec![true; afiles.len()];
+        crate::compress::write_archive_encrypted(&afiles, &opts, password, &encrypt).unwrap()
+    }
+
+    /// TC-3: wrong password -> ZIP_ER_WRONGPASS (27).
+    #[test]
+    fn wrong_password() {
+        let bytes = encrypted_archive(&[("secret.txt", b"top secret data".to_vec())], b"right-pw");
+        let arch = Archive::open(Cursor::new(bytes)).unwrap();
+        let err = arch
+            .open_entry_with_password(0, Some(b"wrong-pw"))
+            .unwrap_err();
+        assert_eq!(err.code(), ZipErrorCode::Wrongpasswd);
+    }
+
+    /// TC-4: no password -> ZIP_ER_NOPASS (26).
+    #[test]
+    fn no_password() {
+        let bytes = encrypted_archive(&[("secret.txt", b"top secret data".to_vec())], b"right-pw");
+        let arch = Archive::open(Cursor::new(bytes)).unwrap();
+        let err = arch.open_entry(0).unwrap_err();
+        assert_eq!(err.code(), ZipErrorCode::Nopasswd);
+    }
+
+    /// Correct password decrypts and reads the original bytes.
+    #[test]
+    fn correct_password_reads_original() {
+        let content = b"encrypted round-trip payload ".repeat(40);
+        let bytes = encrypted_archive(&[("a.txt", content.clone())], b"kzip-test-password");
+        let arch = Archive::open(Cursor::new(bytes)).unwrap();
+        let data = arch
+            .read_entry_with_password(0, Some(b"kzip-test-password"))
+            .unwrap();
+        assert_eq!(data, content);
+    }
+
+    /// Default password (set via `set_default_password`) decrypts entries.
+    #[test]
+    fn default_password_decrypts() {
+        let content = b"default password content".to_vec();
+        let bytes = encrypted_archive(&[("a.txt", content.clone())], b"kzip-test-password");
+        let arch = Archive::open(Cursor::new(bytes)).unwrap();
+        arch.set_default_password(b"kzip-test-password");
+        let data = arch.read_entry(0).unwrap();
+        assert_eq!(data, content);
+    }
+
+    /// TC-7: `zip_stat` reports ZIP_EM_TRAD_PKWARE (1) for encrypted entries,
+    /// and still ZIP_EM_NONE (0) for unencrypted entries (no regression).
+    #[test]
+    fn stat_encryption_method_trad_pkw() {
+        // Encrypted entry.
+        let enc = encrypted_archive(&[("e.txt", b"enc".to_vec())], b"pw");
+        let arch = Archive::open(Cursor::new(enc)).unwrap();
+        assert_eq!(arch.stat(0).unwrap().encryption_method, Some(1));
+
+        // Unencrypted entry still reports 0.
+        let plain = write_archive(
+            &[ArchiveFile::new("p.txt", b"plain".to_vec())],
+            &CompressOptions::default(),
+        )
+        .unwrap();
+        let arch2 = Archive::open(Cursor::new(plain)).unwrap();
+        assert_eq!(arch2.stat(0).unwrap().encryption_method, Some(0));
+    }
+
+    /// TC-8: malformed/truncated encrypted input must not panic; it yields a
+    /// defined error code.
+    #[test]
+    fn malformed_encrypted_no_panic() {
+        // Truncated local header / ciphertext: opening the entry must error,
+        // not panic.
+        let bytes = encrypted_archive(&[("a.txt", b"payload".to_vec())], b"pw");
+        // Cut the archive in half (truncated ciphertext / central dir).
+        let cut = bytes.len() / 2;
+        let truncated = &bytes[..cut];
+        // Opening may fail (truncated archive) or succeed; either way no panic.
+        if let Ok(arch) = Archive::open(Cursor::new(truncated.to_vec())) {
+            let _ = arch.open_entry_with_password(0, Some(b"pw"));
+        }
+
+        // Garbage after the 12-byte header: a valid header followed by
+        // truncated data. Build a minimal encrypted entry with a too-short
+        // payload.
+        let mut v = Vec::new();
+        v.extend_from_slice(&magic::LOCAL);
+        v.extend_from_slice(&20u16.to_le_bytes());
+        v.extend_from_slice(&1u16.to_le_bytes()); // ENCRYPTED flag
+        v.extend_from_slice(&0u16.to_le_bytes()); // store
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes()); // crc
+        v.extend_from_slice(&(12u32 + 3).to_le_bytes()); // comp_size = header + 3
+        v.extend_from_slice(&5u32.to_le_bytes()); // uncomp_size
+        v.extend_from_slice(&1u16.to_le_bytes()); // name len
+        v.extend_from_slice(&0u16.to_le_bytes()); // extra len
+        v.push(b'a'); // name
+        v.extend_from_slice(&[0u8; 12]); // header (garbage)
+        v.extend_from_slice(&[1u8, 2, 3]); // truncated ciphertext
+        // Central dir + EOCD for a single entry.
+        let cdir_offset = v.len() as u64;
+        v.extend_from_slice(&magic::CENTRAL);
+        v.extend_from_slice(&(3u16 << 8 | 20u16).to_le_bytes());
+        v.extend_from_slice(&20u16.to_le_bytes());
+        v.extend_from_slice(&1u16.to_le_bytes()); // ENCRYPTED
+        v.extend_from_slice(&0u16.to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.extend_from_slice(&(12u32 + 3).to_le_bytes());
+        v.extend_from_slice(&5u32.to_le_bytes());
+        v.extend_from_slice(&1u16.to_le_bytes());
+        v.extend_from_slice(&0u16.to_le_bytes());
+        v.extend_from_slice(&0u16.to_le_bytes());
+        v.extend_from_slice(&0u16.to_le_bytes());
+        v.extend_from_slice(&0u16.to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.push(b'a');
+        let cdir_size = (v.len() as u64) - cdir_offset;
+        v.extend_from_slice(&magic::EOCD);
+        v.extend_from_slice(&0u16.to_le_bytes());
+        v.extend_from_slice(&0u16.to_le_bytes());
+        v.extend_from_slice(&1u16.to_le_bytes());
+        v.extend_from_slice(&1u16.to_le_bytes());
+        v.extend_from_slice(&(cdir_size as u32).to_le_bytes());
+        v.extend_from_slice(&(cdir_offset as u32).to_le_bytes());
+        v.extend_from_slice(&0u16.to_le_bytes());
+
+        let arch = Archive::open(Cursor::new(v)).unwrap();
+        // Wrong password (garbage header) -> WRONGPASS; no panic.
+        let _ = arch.open_entry_with_password(0, Some(b"pw"));
     }
 }

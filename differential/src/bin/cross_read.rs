@@ -47,6 +47,7 @@ struct CReadApi {
     zip_fread: unsafe extern "C" fn(*mut Fh, *mut c_void, u64) -> i64,
     zip_fclose: unsafe extern "C" fn(*mut Fh) -> i32,
     zip_close: unsafe extern "C" fn(*mut Zh) -> i32,
+    zip_set_default_password: unsafe extern "C" fn(*mut Zh, *const libc::c_char) -> i32,
 }
 
 impl CReadApi {
@@ -65,6 +66,7 @@ impl CReadApi {
             zip_fread: resolve(&lib, "zip_fread")?,
             zip_fclose: resolve(&lib, "zip_fclose")?,
             zip_close: resolve(&lib, "zip_close")?,
+            zip_set_default_password: resolve(&lib, "zip_set_default_password")?,
             _lib: lib,
         })
     }
@@ -155,6 +157,11 @@ fn c_writes_rust_reads(corpus: &Path) -> Vec<ArchiveCheck> {
                 continue;
             }
         };
+        // Phase 1: supply the known password for the ZipCrypto-encrypted
+        // corpus archive so entries decrypt.
+        if stem.contains("enc_zipcrypto") {
+            arch.set_default_password(KZIP_TEST_PASSWORD.as_bytes());
+        }
 
         let mut checks = Vec::new();
         for i in 0..arch.len() {
@@ -186,8 +193,14 @@ fn c_writes_rust_reads(corpus: &Path) -> Vec<ArchiveCheck> {
     result
 }
 
-/// Part (b): Rust `write_archive` output read by the C library.
-fn rust_writes_c_reads(api: &CReadApi, corpus: &Path) -> ArchiveCheck {
+/// Password for the Rust-written encrypted archive (Phase 1 TC-2).
+const KZIP_TEST_PASSWORD: &str = "kzip-test-password";
+
+/// Part (b): Rust `write_archive` output read by the C library — both a plain
+/// (deflate) archive and a ZipCrypto-encrypted archive.
+fn rust_writes_c_reads(api: &CReadApi, corpus: &Path) -> Vec<ArchiveCheck> {
+    let mut out = Vec::new();
+
     let files = vec![
         ArchiveFile::new("a.txt", b"rust writes, c reads payload ".repeat(80)),
         ArchiveFile::new("b.bin", (0u8..=255).cycle().take(4096).collect::<Vec<u8>>()),
@@ -195,15 +208,15 @@ fn rust_writes_c_reads(api: &CReadApi, corpus: &Path) -> ArchiveCheck {
         ArchiveFile::new("sub/c.txt", b"nested rust file ".repeat(30)),
         ArchiveFile::new("uni/japan-日本語.txt", b"unicode rust ".repeat(20)),
     ];
-
     let opts = CompressOptions {
         method: CompressionMethod::Deflate,
         level: 6,
         parallel: false,
         ..Default::default()
     };
-    let bytes = zip_core::write_archive(&files, &opts).expect("write_archive");
 
+    // Unencrypted archive.
+    let bytes = zip_core::write_archive(&files, &opts).expect("write_archive");
     let rust_dir = corpus.join("rust-written");
     let in_dir = corpus.join("inputs").join("rust_deflate");
     std::fs::create_dir_all(&rust_dir).unwrap();
@@ -213,14 +226,40 @@ fn rust_writes_c_reads(api: &CReadApi, corpus: &Path) -> ArchiveCheck {
     for (i, f) in files.iter().enumerate() {
         std::fs::write(in_dir.join(format!("{i}")), &f.data).unwrap();
     }
+    out.push(check_c_reads(api, &zip_path, &files, false));
 
+    // ZipCrypto-encrypted archive.
+    let enc = vec![true; files.len()];
+    let enc_bytes = zip_core::write_archive_encrypted(&files, &opts, KZIP_TEST_PASSWORD.as_bytes(), &enc)
+        .expect("write_archive_encrypted");
+    let enc_dir = corpus.join("inputs").join("rust_zipcrypto");
+    std::fs::create_dir_all(&enc_dir).unwrap();
+    let enc_path = rust_dir.join("rust_zipcrypto.zip");
+    std::fs::write(&enc_path, &enc_bytes).unwrap();
+    for (i, f) in files.iter().enumerate() {
+        std::fs::write(enc_dir.join(format!("{i}")), &f.data).unwrap();
+    }
+    out.push(check_c_reads(api, &enc_path, &files, true));
+
+    out
+}
+
+/// Read `zip_path` (written by Rust) with the C library and verify every
+/// entry matches `files`. When `encrypted`, the C library is told the default
+/// password so `zip_fopen_index` decrypts.
+fn check_c_reads(api: &CReadApi, zip_path: &std::path::Path, files: &[ArchiveFile], encrypted: bool) -> ArchiveCheck {
     let cpath = CString::new(zip_path.to_string_lossy().as_bytes()).unwrap();
     let mut errp: i32 = 0;
     let zh = unsafe { (api.zip_open)(cpath.as_ptr(), 0, &mut errp) };
     assert!(
         !zh.is_null(),
-        "C libzip could not open Rust-written archive errp={errp}"
+        "C libzip could not open Rust-written archive {} errp={errp}",
+        zip_path.display()
     );
+    if encrypted {
+        let pw = CString::new(KZIP_TEST_PASSWORD).unwrap();
+        unsafe { (api.zip_set_default_password)(zh, pw.as_ptr()) };
+    }
     let num = unsafe { (api.zip_get_num_entries)(zh, 0) };
     assert_eq!(num, files.len() as i64);
 
@@ -281,7 +320,7 @@ fn main() {
     println!("{}", serde_json::to_string_pretty(&out).unwrap());
 
     let a_ok = a.iter().all(|x| x.all_match);
-    let b_ok = b.all_match;
+    let b_ok = b.iter().all(|x| x.all_match);
     eprintln!(
         "[cross_read] C-writes/Rust-reads all_match={a_ok}, Rust-writes/C-reads all_match={b_ok}"
     );

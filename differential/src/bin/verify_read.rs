@@ -54,6 +54,7 @@ struct ZipApi {
     zip_strerror: unsafe extern "C" fn(*const ZipHandle) -> *const libc::c_char,
     zip_close: unsafe extern "C" fn(*mut ZipHandle) -> i32,
     zip_libzip_version: unsafe extern "C" fn() -> *const libc::c_char,
+    zip_set_default_password: unsafe extern "C" fn(*mut ZipHandle, *const libc::c_char) -> i32,
 }
 
 impl ZipApi {
@@ -77,6 +78,7 @@ impl ZipApi {
             zip_strerror: resolve(&lib, "zip_strerror")?,
             zip_close: resolve(&lib, "zip_close")?,
             zip_libzip_version: resolve(&lib, "zip_libzip_version")?,
+            zip_set_default_password: resolve(&lib, "zip_set_default_password")?,
             _lib: lib,
         })
     }
@@ -215,6 +217,17 @@ unsafe fn process_archive(api: &ZipApi, path: &Path) -> ArchiveRecord {
             err_fopen_index_oob_status: "archive_not_open".into(),
             err_fopen_index_oob_strerror: None,
         };
+    }
+
+    // Phase 1: supply the known password for the ZipCrypto-encrypted corpus so
+    // entries decrypt (otherwise fopen hits the NOPASS path).
+    let fname = path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    if fname.contains("enc_zipcrypto") {
+        let pw = CString::new("kzip-test-password").unwrap_or_default();
+        unsafe { (api.zip_set_default_password)(zh, pw.as_ptr()) };
     }
 
     let num = unsafe { (api.zip_get_num_entries)(zh, 0) };

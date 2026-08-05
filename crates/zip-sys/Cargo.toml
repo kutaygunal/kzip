@@ -17,6 +17,7 @@ libc.workspace = true
 
 [dev-dependencies]
 crc32fast.workspace = true
+libloading.workspace = true
 
 [features]
 default = []

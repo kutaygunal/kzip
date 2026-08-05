@@ -48,6 +48,9 @@ pub struct CompressOptions {
     pub workers: usize,
     /// Files at or above this size (bytes) are compressed serially.
     pub large_file_threshold: u64,
+    /// Encryption method to apply when writing via [`write_archive_encrypted`]
+    /// (0 = none, 1 = traditional PKWARE). Ignored by [`write_archive`].
+    pub encryption_method: u16,
 }
 
 impl Default for CompressOptions {
@@ -58,6 +61,7 @@ impl Default for CompressOptions {
             parallel: true,
             workers: 0,
             large_file_threshold: 8 * 1024 * 1024,
+            encryption_method: 0,
         }
     }
 }
@@ -72,12 +76,16 @@ pub struct CompressedFile {
     pub method: u16,
     /// CRC-32 of the uncompressed content.
     pub crc: u32,
-    /// Compressed byte length.
+    /// Compressed byte length (includes the 12-byte encryption header when
+    /// encrypted).
     pub comp_size: u64,
     /// Uncompressed byte length.
     pub uncomp_size: u64,
-    /// Compressed bytes.
+    /// Compressed bytes (for encrypted entries: the 12-byte header followed by
+    /// the encrypted compressed bytes).
     pub data: Vec<u8>,
+    /// Encryption method (0 = none, 1 = traditional PKWARE).
+    pub encryption_method: u16,
 }
 
 /// Compress a single byte slice. Deterministic given `(method, level, input)`.
@@ -106,6 +114,7 @@ pub fn compress_file(file: &ArchiveFile, opts: &CompressOptions) -> Result<Compr
         comp_size: data.len() as u64,
         uncomp_size: file.data.len() as u64,
         data,
+        encryption_method: 0,
     })
 }
 
@@ -182,13 +191,42 @@ fn method_to_u16(m: CompressionMethod) -> u16 {
 ///
 /// The layout is local-file-header + data for each member (in order), then the
 /// central directory, then the EOCD record. The produced bytes can be re-read
-/// with [`crate::Archive::open`].
+/// with [`crate::Archive::open`]. Entries are written unencrypted.
 pub fn write_archive(files: &[ArchiveFile], opts: &CompressOptions) -> Result<Vec<u8>> {
     let compressed = compress_files(files, opts)?;
+    write_compressed(&compressed)
+}
+
+/// Write a complete ZIP archive, encrypting the entries flagged in `encrypt`
+/// (index-aligned with `files`) with traditional PKWARE (ZipCrypto) using
+/// `password`.
+///
+/// `opts.encryption_method` is ignored here; the per-entry `encrypt` flags
+/// decide which entries are encrypted. Encrypted entries get the `ENCRYPTED`
+/// bit flag and a 12-byte encryption header prepended to their compressed data.
+pub fn write_archive_encrypted(
+    files: &[ArchiveFile],
+    opts: &CompressOptions,
+    password: &[u8],
+    encrypt: &[bool],
+) -> Result<Vec<u8>> {
+    let mut compressed = compress_files(files, opts)?;
+    for (cf, &enc) in compressed.iter_mut().zip(encrypt) {
+        if enc {
+            let encrypted = crate::crypto::encrypt_data(password, cf.crc, &cf.data);
+            cf.data = encrypted;
+            cf.comp_size = cf.data.len() as u64;
+            cf.encryption_method = crate::constant::encryption::TRAD_PKWARE;
+        }
+    }
+    write_compressed(&compressed)
+}
+
+fn write_compressed(compressed: &[CompressedFile]) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     let mut cdir = Vec::new();
 
-    for cf in &compressed {
+    for cf in compressed {
         let offset = out.len() as u64;
         write_local_header(cf, &mut out);
         out.extend_from_slice(&cf.data);
@@ -203,9 +241,14 @@ pub fn write_archive(files: &[ArchiveFile], opts: &CompressOptions) -> Result<Ve
 }
 
 fn write_local_header(cf: &CompressedFile, out: &mut Vec<u8>) {
+    let flags = if cf.encryption_method != 0 {
+        flag::ENCRYPTED
+    } else {
+        0
+    };
     out.extend_from_slice(&magic::LOCAL);
     out.extend_from_slice(&20u16.to_le_bytes()); // version needed
-    out.extend_from_slice(&0u16.to_le_bytes()); // bit flags (sizes known)
+    out.extend_from_slice(&flags.to_le_bytes()); // bit flags
     out.extend_from_slice(&cf.method.to_le_bytes());
     out.extend_from_slice(&0u32.to_le_bytes()); // dos time/date = 0
     out.extend_from_slice(&cf.crc.to_le_bytes());
@@ -217,10 +260,15 @@ fn write_local_header(cf: &CompressedFile, out: &mut Vec<u8>) {
 }
 
 fn write_central_entry(cf: &CompressedFile, offset: u64, cdir: &mut Vec<u8>) {
+    let flags = if cf.encryption_method != 0 {
+        flag::ENCRYPTED
+    } else {
+        0
+    };
     cdir.extend_from_slice(&magic::CENTRAL);
     cdir.extend_from_slice(&(3u16 << 8 | 20u16).to_le_bytes()); // version made by: unix, 2.0
     cdir.extend_from_slice(&20u16.to_le_bytes()); // version needed
-    cdir.extend_from_slice(&0u16.to_le_bytes()); // bit flags
+    cdir.extend_from_slice(&flags.to_le_bytes()); // bit flags
     cdir.extend_from_slice(&cf.method.to_le_bytes());
     cdir.extend_from_slice(&0u32.to_le_bytes()); // dos time/date
     cdir.extend_from_slice(&cf.crc.to_le_bytes());

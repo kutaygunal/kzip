@@ -80,7 +80,7 @@ Legend:
 | Symbol | Status | Notes |
 |--------|--------|-------|
 | `zip_compression_method_supported` | COMPLETE | Store/Deflate both ways; Bzip2 decompress-only |
-| `zip_encryption_method_supported` | COMPLETE | only `ZIP_EM_NONE` |
+| `zip_encryption_method_supported` | COMPLETE | `ZIP_EM_NONE` + `ZIP_EM_TRAD_PKWARE` |
 
 ## Comments & extra fields — READ COMPLETE, WRITE DEFERRED
 
@@ -94,18 +94,21 @@ Legend:
 | `zip_file_extra_field_get_by_id` | COMPLETE | read |
 | `zip_set_archive_comment`, `zip_file_set_comment`, `zip_file_extra_field_set`/`delete` | DEFERRED | write side needs writer comment/extra-field support |
 
-## Encryption — DEFERRED
+## Encryption — ZipCrypto (traditional PKWARE) COMPLETE, WinZip AES DEFERRED
 
-`zip_fopen_encrypted`, `zip_fopen_index_encrypted`, `zip_set_encryption`,
-`zip_file_set_encryption` are deferred (zip-core encryption lands in a later
-phase; the read path currently rejects encrypted entries with
-`ZIP_ER_ENCRNOTSUPP`).
+Phase 1 adds traditional PKWARE (ZipCrypto) read + write:
+`zip_fopen_encrypted`, `zip_fopen_index_encrypted`, `zip_set_default_password`,
+`zip_file_set_encryption` (method `ZIP_EM_TRAD_PKWARE` = 1). Encrypted entries
+are decrypted on read with the correct password (wrong password →
+`ZIP_ER_WRONGPASS`, none → `ZIP_ER_NOPASS`); `zip_stat` reports
+`ZIP_EM_TRAD_PKWARE`. WinZip AES (methods 2-3) remains deferred.
 
 ## Deferred (dedicated phases)
 
 - **Full `zip_source_*` streaming source API** (38 symbols: buffer/file/function/
   layered/window/user-defined) — only the minimal buffer source is exported.
-- **Encryption** (ZipCrypto + WinZip AES, read & write).
+- **Encryption: WinZip AES** (read & write) — ZipCrypto (traditional PKWARE) is
+  done; AES-128/192/256 remains for Phase 2.
 - **Progress/cancel callbacks**, Win32 sources, `zip_fdopen`/`zip_open_from_source`,
   `zip_unchange*`, `zip_register_progress_callback*`,
   `zip_register_cancel_callback_with_state`.
