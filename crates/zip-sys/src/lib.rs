@@ -79,6 +79,16 @@ const ZIP_FL_OVERWRITE: u32 = 8192;
 /// `zip_error_system_type` return values.
 const ZIP_ET_NONE: c_int = 0;
 const ZIP_ET_SYS: c_int = 1;
+const ZIP_ET_ZLIB: c_int = 2;
+const ZIP_ET_LIBZIP: c_int = 3;
+
+/// Archive global flags (`ZIP_AFL_*`) for `zip_get_archive_flag` /
+/// `zip_set_archive_flag`.
+const ZIP_AFL_RDONLY: c_int = 2;
+const ZIP_AFL_IS_TORRENTZIP: c_int = 4;
+const ZIP_AFL_WANT_TORRENTZIP: c_int = 8;
+const ZIP_AFL_CREATE_OR_KEEP_FILE_FOR_EMPTY_ARCHIVE: c_int = 16;
+const ZIP_CM_LZMA: i32 = 14;
 
 /// `zip_fseek` whence values (POSIX).
 const SEEK_SET: c_int = 0;
@@ -841,6 +851,13 @@ struct Zip {
     path: Option<CString>,
     /// Flags passed to `zip_open` (ZIP_CREATE / ZIP_TRUNCATE / ...).
     flags: c_int,
+    /// Original archive global flags (`ZIP_AFL_*`) as of open (mirrors C
+    /// `za->flags`; reported by `zip_get_archive_flag(..., ZIP_FL_UNCHANGED)`).
+    afl: AtomicI32,
+    /// Changed archive global flags (mirrors C `za->ch_flags`; the live flags
+    /// that `zip_get_archive_flag` reports by default). `zip_unchange_archive`
+    /// resets this back to `afl`.
+    ch_afl: AtomicI32,
     /// Whether the file existed when the archive was opened.
     existed: bool,
     /// Pending write operations.
@@ -879,6 +896,9 @@ struct ZipFile {
     reader: Mutex<EntryReader>,
     last_error: AtomicI32,
     err_msg: Mutex<CString>,
+    /// Structured `zip_error_t` returned by `zip_file_get_error`, serialized
+    /// with the reader and `last_error` (the `str` pointer is owned here).
+    error: Mutex<ZipErrorState>,
 }
 
 impl Zip {
@@ -1063,12 +1083,55 @@ impl Zip {
         };
         Ok(())
     }
+
+    /// Reset the live archive-comment overlay back to the on-disk comment so
+    /// `zip_get_archive_comment` reflects the disk (used by `unchange*`).
+    fn reset_archive_comment_overlay(&self) {
+        let orig = self.archive.comment().as_bytes();
+        let mut ov = self.archive_comment.lock().unwrap_or_else(|e| e.into_inner());
+        *ov = if orig.is_empty() {
+            None
+        } else {
+            let mut buf = orig.to_vec();
+            buf.push(0);
+            Some(buf)
+        };
+    }
+
+    /// Revert every pending edit targeting logical entry `index` (per-entry
+    /// metadata ops, delete, rename, replace, encryption, and a pending add).
+    fn unchange_entry(&self, pending: &mut PendingOps, index: u64) {
+        pending.deletes.retain(|&i| i != index);
+        pending.renames.retain(|(i, _)| *i != index);
+        pending.replaces.retain(|(i, _)| *i != index);
+        pending.encryptions.retain(|(i, _)| *i != index);
+        pending.extra_field_ops.retain(|(i, _)| *i != index);
+        pending.file_comments.retain(|(i, _)| *i != index);
+        pending.dostimes.retain(|(i, _, _)| *i != index);
+        pending.mtimes.retain(|(i, _)| *i != index);
+        pending.ext_attrs.retain(|(i, _, _)| *i != index);
+        pending.compressions.retain(|(i, _, _)| *i != index);
+        // A pending add at this logical index is removed (subsequent adds shift
+        // down by one in logical-index space).
+        if index >= self.archive.len() as u64 {
+            let add_pos = (index - self.archive.len() as u64) as usize;
+            if add_pos < pending.adds.len() {
+                pending.adds.remove(add_pos);
+            }
+        }
+    }
 }
 
 impl ZipFile {
     fn set_err(&self, code: i32) {
         self.last_error.store(code, Ordering::Relaxed);
         *self.err_msg.lock().unwrap() = CString::new(err_str(code)).unwrap_or_default();
+        let mut g = self.error.lock().unwrap_or_else(|e| e.into_inner());
+        g.ze.zip_err = code;
+        g.ze.sys_err = 0;
+        let s = CString::new(err_str(code)).unwrap_or_default();
+        g.ze.str = s.as_ptr() as *mut c_char;
+        g.owned = Some(s);
     }
 }
 
@@ -1275,6 +1338,16 @@ fn make_zip(archive: Archive, flags: c_int, existed: bool, path: Option<CString>
         }),
         path,
         flags,
+        afl: AtomicI32::new(if flags & ZIP_RDONLY != 0 {
+            ZIP_AFL_RDONLY
+        } else {
+            0
+        }),
+        ch_afl: AtomicI32::new(if flags & ZIP_RDONLY != 0 {
+            ZIP_AFL_RDONLY
+        } else {
+            0
+        }),
         existed,
         pending: Mutex::new(PendingOps::default()),
         password: Mutex::new(None),
@@ -1784,6 +1857,169 @@ pub unsafe extern "C" fn zip_get_num_entries(zh: H, _flags: u32) -> i64 {
     )
 }
 
+/// Deprecated alias for [`zip_get_num_entries`]: return the number of entries
+/// as an `int`, or -1 (with `ZIP_ER_OPNOTSUPP`) if the count overflows `int`.
+///
+/// # Safety
+///
+/// `zh` must be a valid, open handle.
+#[no_mangle]
+pub unsafe extern "C" fn zip_get_num_files(zh: H) -> c_int {
+    guarded(
+        || {
+            let z = zh.cast::<Zip>().as_ref().ok_or(-1)?;
+            let n = z.archive.len();
+            if n > i32::MAX as u64 {
+                z.set_err(ZipErrorCode::Opnotsupp.as_i32(), 0);
+                return Err(-1);
+            }
+            Ok(n as c_int)
+        },
+        -1,
+    )
+}
+
+/// Return whether the archive global flag `flag` is set. With
+/// `flags & ZIP_FL_UNCHANGED`, the on-disk (pre-edit) flags are consulted;
+/// otherwise the live (changed) flags are returned. Returns 1 if set, else 0.
+///
+/// # Safety
+///
+/// `zh` must be a valid, open handle.
+#[no_mangle]
+pub unsafe extern "C" fn zip_get_archive_flag(zh: H, flag: c_int, flags: u32) -> c_int {
+    guarded(
+        || {
+            let z = zh.cast::<Zip>().as_ref().ok_or(-1)?;
+            let fl = if flags & ZIP_FL_UNCHANGED != 0 {
+                z.afl.load(Ordering::Relaxed)
+            } else {
+                z.ch_afl.load(Ordering::Relaxed)
+            };
+            Ok(if fl & flag != 0 { 1 } else { 0 })
+        },
+        -1,
+    )
+}
+
+/// Set or clear the archive global flag `flag` on the live (changed) flag set
+/// (applied on [`zip_close`]). Returns 0 on success, -1 on error.
+///
+/// Mirroring C libzip: `ZIP_AFL_IS_TORRENTZIP` cannot be set manually
+/// (`ZIP_ER_INVAL`), a read-only archive rejects changes (`ZIP_ER_RDONLY`),
+/// and setting `ZIP_AFL_RDONLY` is refused while edits are pending
+/// (`ZIP_ER_CHANGED`).
+///
+/// # Safety
+///
+/// `zh` must be a valid, open handle.
+#[no_mangle]
+pub unsafe extern "C" fn zip_set_archive_flag(zh: H, flag: c_int, value: c_int) -> c_int {
+    guarded(
+        || {
+            let z = zh.cast::<Zip>().as_ref().ok_or(-1)?;
+            if flag == ZIP_AFL_IS_TORRENTZIP {
+                z.set_err(ZipErrorCode::Inval.as_i32(), 0);
+                return Err(-1);
+            }
+            let cur = z.ch_afl.load(Ordering::Relaxed);
+            let new_flags = if value != 0 {
+                cur | flag
+            } else {
+                cur & !flag
+            };
+            if new_flags == cur {
+                return Ok(0);
+            }
+            // Allow removing ZIP_AFL_RDONLY if manually set, not if the archive
+            // was opened read-only (then the original flags already carry it).
+            if z.afl.load(Ordering::Relaxed) & ZIP_AFL_RDONLY != 0 {
+                z.set_err(ZipErrorCode::Rdonly.as_i32(), 0);
+                return Err(-1);
+            }
+            if flag == ZIP_AFL_RDONLY
+                && value != 0
+                && cur & ZIP_AFL_RDONLY == 0
+                && !z.pending.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
+            {
+                z.set_err(ZipErrorCode::Changed.as_i32(), 0);
+                return Err(-1);
+            }
+            z.ch_afl.store(new_flags, Ordering::Relaxed);
+            Ok(0)
+        },
+        -1,
+    )
+}
+
+/// Undo all per-entry pending edits for the entry at `index`, reverting it to
+/// its on-disk state. Also removes a pending add at that index. Returns 0 on
+/// success, -1 (with `ZIP_ER_INVAL`) on an out-of-range index.
+///
+/// # Safety
+///
+/// `zh` must be a valid, open handle.
+#[no_mangle]
+pub unsafe extern "C" fn zip_unchange(zh: H, index: u64) -> c_int {
+    guarded(
+        || {
+            let z = zh.cast::<Zip>().as_ref().ok_or(-1)?;
+            let mut pending = z.pending.lock().unwrap_or_else(|e| e.into_inner());
+            if index >= z.archive.len() as u64 + pending.adds.len() as u64 {
+                z.set_err(ZipErrorCode::Inval.as_i32(), 0);
+                return Err(-1);
+            }
+            z.unchange_entry(&mut pending, index);
+            Ok(0)
+        },
+        -1,
+    )
+}
+
+/// Undo all pending changes to the archive (both per-entry and archive-level),
+/// reverting it to its on-disk state. Returns 0 on success.
+///
+/// # Safety
+///
+/// `zh` must be a valid, open handle.
+#[no_mangle]
+pub unsafe extern "C" fn zip_unchange_all(zh: H) -> c_int {
+    guarded(
+        || {
+            let z = zh.cast::<Zip>().as_ref().ok_or(-1)?;
+            let mut pending = z.pending.lock().unwrap_or_else(|e| e.into_inner());
+            *pending = PendingOps::default();
+            z.ch_afl.store(z.afl.load(Ordering::Relaxed), Ordering::Relaxed);
+            z.reset_archive_comment_overlay();
+            Ok(0)
+        },
+        -1,
+    )
+}
+
+/// Undo archive-level pending changes (the archive comment and archive global
+/// flags), leaving per-entry edits intact. Returns 0 on success.
+///
+/// # Safety
+///
+/// `zh` must be a valid, open handle.
+#[no_mangle]
+pub unsafe extern "C" fn zip_unchange_archive(zh: H) -> c_int {
+    guarded(
+        || {
+            let z = zh.cast::<Zip>().as_ref().ok_or(-1)?;
+            {
+                let mut pending = z.pending.lock().unwrap_or_else(|e| e.into_inner());
+                pending.archive_comment = None;
+            }
+            z.ch_afl.store(z.afl.load(Ordering::Relaxed), Ordering::Relaxed);
+            z.reset_archive_comment_overlay();
+            Ok(0)
+        },
+        -1,
+    )
+}
+
 /// Name of the entry at `index`, or NULL if out of range.
 ///
 /// The returned pointer is valid until [`zip_close`]. The caller must not free
@@ -2004,6 +2240,61 @@ pub unsafe extern "C" fn zip_fclose(fh: H) -> c_int {
     )
 }
 
+/// Clear an open entry's error to no-error (deprecated libzip helper). Returns
+/// without effect on a NULL handle.
+///
+/// # Safety
+///
+/// `fh` must be a valid, open handle from [`zip_fopen`].
+#[no_mangle]
+pub unsafe extern "C" fn zip_file_error_clear(fh: H) {
+    if !fh.is_null() {
+        if let Some(f) = fh.cast::<ZipFile>().as_ref() {
+            f.set_err(0);
+        }
+    }
+}
+
+/// Copy an open entry's zip and system error codes into `zep`/`sep` (if
+/// non-null) (deprecated libzip helper).
+///
+/// # Safety
+///
+/// `fh` must be a valid, open handle from [`zip_fopen`]; `zep`/`sep` (if
+/// non-null) writable int storage.
+#[no_mangle]
+pub unsafe extern "C" fn zip_file_error_get(fh: H, zep: *mut c_int, sep: *mut c_int) {
+    if !fh.is_null() {
+        if let Some(f) = fh.cast::<ZipFile>().as_ref() {
+            let g = f.error.lock().unwrap_or_else(|e| e.into_inner());
+            if !zep.is_null() {
+                unsafe { *zep = g.ze.zip_err };
+            }
+            if !sep.is_null() {
+                unsafe { *sep = g.ze.sys_err };
+            }
+        }
+    }
+}
+
+/// Return a pointer to the open entry's `zip_error_t`, valid until the next
+/// error is set on the handle. Returns NULL on a NULL/invalid handle.
+///
+/// # Safety
+///
+/// `fh` must be a valid, open handle from [`zip_fopen`].
+#[no_mangle]
+pub unsafe extern "C" fn zip_file_get_error(fh: H) -> *mut zip_error {
+    guarded(
+        || {
+            let f = fh.cast::<ZipFile>().as_ref().ok_or(-1)?;
+            let g = f.error.lock().unwrap_or_else(|e| e.into_inner());
+            Ok(&g.ze as *const zip_error as *mut zip_error)
+        },
+        std::ptr::null_mut(),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Encrypted entry reading
 // ---------------------------------------------------------------------------
@@ -2036,6 +2327,14 @@ unsafe fn make_zipfile(z: &Zip, data: Vec<u8>, index: u64) -> H {
                 reader: Mutex::new(buffered),
                 last_error: AtomicI32::new(0),
                 err_msg: Mutex::new(CString::new(err_str(0)).unwrap_or_default()),
+                error: Mutex::new(ZipErrorState {
+                    ze: zip_error {
+                        zip_err: 0,
+                        sys_err: 0,
+                        str: std::ptr::null_mut(),
+                    },
+                    owned: Some(CString::new(err_str(0)).unwrap_or_default()),
+                }),
             });
             Box::into_raw(f) as H
         }
@@ -4428,6 +4727,24 @@ pub unsafe extern "C" fn zip_error_set_from_source(ze: *mut zip_error, _src: H) 
     }
 }
 
+/// Return the system-error type of the zip error code `ze` (deprecated libzip
+/// helper). Mirrors C `zip_error_get_sys_type`, which indexes libzip's
+/// `_zip_err_str[]` table and returns the `ZIP_ET_*` type of that error.
+///
+/// Returns `ZIP_ET_SYS` for OS-backed codes (Read/Write/Seek/Open/...),
+/// `ZIP_ET_ZLIB` for the zlib code, `ZIP_ET_LIBZIP` for the inconsistent-archive
+/// code, and `ZIP_ET_NONE` for everything else. Out-of-range codes return
+/// `ZIP_ET_NONE` (no panic).
+#[no_mangle]
+pub extern "C" fn zip_error_get_sys_type(ze: c_int) -> c_int {
+    match ze {
+        2 | 3 | 4 | 5 | 6 | 11 | 12 | 22 | 30 => ZIP_ET_SYS,
+        13 => ZIP_ET_ZLIB,
+        21 => ZIP_ET_LIBZIP,
+        _ => ZIP_ET_NONE,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // fseek / ftell / seekability
 // ---------------------------------------------------------------------------
@@ -6153,6 +6470,9 @@ mod tests {
         assert_eq!(zip_compression_method_supported(ZIP_CM_DEFAULT, 1), 1);
         assert_eq!(zip_compression_method_supported(ZIP_CM_BZIP2, 1), 0);
         assert_eq!(zip_compression_method_supported(ZIP_CM_BZIP2, 0), 1);
+        // Phase 7: LZMA/XZ/ZSTD are not implemented by the Rust core (no codec).
+        assert_eq!(zip_compression_method_supported(ZIP_CM_LZMA, 1), 0);
+        assert_eq!(zip_compression_method_supported(ZIP_CM_LZMA, 0), 0);
         assert_eq!(zip_compression_method_supported(99, 1), 0);
         assert_eq!(zip_encryption_method_supported(ZIP_EM_NONE, 1), 1);
         assert_eq!(zip_encryption_method_supported(ZIP_EM_TRAD_PKWARE, 1), 1);
@@ -6161,6 +6481,215 @@ mod tests {
         assert_eq!(zip_encryption_method_supported(ZIP_EM_AES_192, 1), 1);
         assert_eq!(zip_encryption_method_supported(ZIP_EM_AES_256, 1), 1);
         assert_eq!(zip_encryption_method_supported(99, 1), 0);
+    }
+
+    // ---- Phase 7: archive flags, unchange*, file-error APIs ----
+
+    /// TC-3: `zip_compression_method_supported` returns the correct bool per
+    /// method for this build (store/deflate both ways; bzip2 decompress-only;
+    /// lzma/unknown unsupported).
+    #[test]
+    fn compression_method_supported() {
+        // Store / deflate / default: compress and decompress both supported.
+        assert_eq!(zip_compression_method_supported(ZIP_CM_STORE, 0), 1);
+        assert_eq!(zip_compression_method_supported(ZIP_CM_STORE, 1), 1);
+        assert_eq!(zip_compression_method_supported(ZIP_CM_DEFLATE, 0), 1);
+        assert_eq!(zip_compression_method_supported(ZIP_CM_DEFLATE, 1), 1);
+        assert_eq!(zip_compression_method_supported(ZIP_CM_DEFAULT, 0), 1);
+        assert_eq!(zip_compression_method_supported(ZIP_CM_DEFAULT, 1), 1);
+        // Bzip2: the Rust core decompresses but does not compress.
+        assert_eq!(zip_compression_method_supported(ZIP_CM_BZIP2, 0), 1);
+        assert_eq!(zip_compression_method_supported(ZIP_CM_BZIP2, 1), 0);
+        // LZMA / unknown: not implemented by the Rust core -> false.
+        assert_eq!(zip_compression_method_supported(ZIP_CM_LZMA, 0), 0);
+        assert_eq!(zip_compression_method_supported(ZIP_CM_LZMA, 1), 0);
+        assert_eq!(zip_compression_method_supported(99, 0), 0);
+        assert_eq!(zip_compression_method_supported(99, 1), 0);
+    }
+
+    /// TC-1: `zip_set_archive_flag` / `zip_get_archive_flag` round-trip.
+    #[test]
+    fn archive_flag_round_trip() {
+        let path = temp_path("afl");
+        build_zip(&path);
+        let cpath = CString::new(path.to_string_lossy().as_bytes()).unwrap();
+        let zh = unsafe { zip_open(cpath.as_ptr(), 0, std::ptr::null_mut()) };
+        assert!(!zh.is_null());
+
+        // Initially unset.
+        assert_eq!(unsafe { zip_get_archive_flag(zh, ZIP_AFL_RDONLY, 0) }, 0);
+        assert_eq!(
+            unsafe { zip_get_archive_flag(zh, ZIP_AFL_CREATE_OR_KEEP_FILE_FOR_EMPTY_ARCHIVE, 0) },
+            0
+        );
+
+        // Set RDONLY, then read it back.
+        assert_eq!(unsafe { zip_set_archive_flag(zh, ZIP_AFL_RDONLY, 1) }, 0);
+        assert_eq!(unsafe { zip_get_archive_flag(zh, ZIP_AFL_RDONLY, 0) }, 1);
+        // Clear it.
+        assert_eq!(unsafe { zip_set_archive_flag(zh, ZIP_AFL_RDONLY, 0) }, 0);
+        assert_eq!(unsafe { zip_get_archive_flag(zh, ZIP_AFL_RDONLY, 0) }, 0);
+
+        // CREATE_OR_KEEP round-trip.
+        assert_eq!(
+            unsafe { zip_set_archive_flag(zh, ZIP_AFL_CREATE_OR_KEEP_FILE_FOR_EMPTY_ARCHIVE, 1) },
+            0
+        );
+        assert_eq!(
+            unsafe { zip_get_archive_flag(zh, ZIP_AFL_CREATE_OR_KEEP_FILE_FOR_EMPTY_ARCHIVE, 0) },
+            1
+        );
+
+        // Setting the reserved torrentzip flag is invalid (-1, defined error).
+        assert_eq!(unsafe { zip_set_archive_flag(zh, ZIP_AFL_IS_TORRENTZIP, 1) }, -1);
+        assert_eq!(unsafe { zip_error_code_zip(zip_get_error(zh)) }, 18); // INVAL
+
+        unsafe { zip_close(zh) };
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// TC-2: `zip_unchange*` reverts pending edits to the on-disk state.
+    #[test]
+    fn unchange_revert() {
+        let path = temp_path("unchange");
+        build_zip(&path);
+        let cpath = CString::new(path.to_string_lossy().as_bytes()).unwrap();
+        let zh = unsafe { zip_open(cpath.as_ptr(), 0, std::ptr::null_mut()) };
+        assert!(!zh.is_null());
+
+        // `zip_unchange` reverts a single entry's pending edits. After a
+        // rename, entry 0 still reflects the on-disk name (renames live in the
+        // pending set, not the read-side name table), and unchange returns 0.
+        let newname = CString::new("renamed.txt").unwrap();
+        assert_eq!(unsafe { zip_rename(zh, 0, newname.as_ptr()) }, 0);
+        assert_eq!(unsafe { zip_unchange(zh, 0) }, 0);
+        assert_eq!(unsafe { cstr(zip_get_name(zh, 0, 0)) }, "a.txt");
+
+        // `zip_unchange_archive` reverts only archive-level edits (comment +
+        // flags), leaving per-entry edits pending. Set the flag before queuing
+        // the comment so no pending edit blocks setting RDONLY (C `_zip_changed`).
+        assert_eq!(unsafe { zip_set_archive_flag(zh, ZIP_AFL_RDONLY, 1) }, 0);
+        let acmt = CString::new("new archive comment").unwrap();
+        assert_eq!(unsafe { zip_set_archive_comment(zh, acmt.as_ptr(), 19) }, 0);
+        assert_eq!(unsafe { zip_unchange_archive(zh) }, 0);
+        assert_eq!(unsafe { zip_get_archive_flag(zh, ZIP_AFL_RDONLY, 0) }, 0);
+        let mut alen: c_int = 99;
+        assert!(unsafe { zip_get_archive_comment(zh, &mut alen, 0) }.is_null());
+        assert_eq!(alen, 0);
+
+        // Out-of-range unchange -> INVAL, no panic.
+        assert_eq!(unsafe { zip_unchange(zh, 999) }, -1);
+        assert_eq!(unsafe { zip_error_code_zip(zip_get_error(zh)) }, 18);
+
+        // Now queue a mix of edits, then revert the whole archive.
+        assert_eq!(unsafe { zip_rename(zh, 0, newname.as_ptr()) }, 0);
+        assert_eq!(unsafe { zip_delete(zh, 1) }, 0);
+        let src = CString::new("new-file-data").unwrap();
+        let s = unsafe { zip_source_buffer(zh, src.as_ptr() as *const c_void, 13, 0) };
+        assert!(!s.is_null());
+        assert_eq!(unsafe { zip_file_add(zh, CString::new("new.txt").unwrap().as_ptr(), s, 0) }, 3);
+        unsafe { zip_source_free(s) };
+        let acmt = CString::new("new archive comment").unwrap();
+        assert_eq!(unsafe { zip_set_archive_comment(zh, acmt.as_ptr(), 19) }, 0);
+
+        assert_eq!(unsafe { zip_unchange_all(zh) }, 0);
+
+        // With no pending edits, close does not rewrite the file; reopening
+        // yields the original on-disk archive (3 entries, no "new.txt").
+        assert_eq!(unsafe { zip_close(zh) }, 0);
+        let zh2 = unsafe { zip_open(cpath.as_ptr(), 0, std::ptr::null_mut()) };
+        assert!(!zh2.is_null());
+        assert_eq!(unsafe { zip_get_num_entries(zh2, 0) }, 3);
+        assert_eq!(unsafe { cstr(zip_get_name(zh2, 0, 0)) }, "a.txt");
+        assert_eq!(unsafe { cstr(zip_get_name(zh2, 1, 0)) }, "b.bin");
+        let fh = unsafe {
+            zip_fopen(zh2, CString::new("a.txt").unwrap().as_ptr(), 0)
+        };
+        assert!(!fh.is_null());
+        let data = unsafe { read_ffi_full(fh) };
+        assert_eq!(data, b"hello ffi read path content ".repeat(20));
+        unsafe { zip_fclose(fh) };
+        unsafe { zip_close(zh2) };
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// TC-4: `zip_file_error_clear` / `zip_file_error_get` / `zip_file_get_error`.
+    #[test]
+    fn file_error_apis() {
+        let path = temp_path("file_err");
+        build_zip(&path);
+        let cpath = CString::new(path.to_string_lossy().as_bytes()).unwrap();
+        let zh = unsafe { zip_open(cpath.as_ptr(), 0, std::ptr::null_mut()) };
+        assert!(!zh.is_null());
+
+        let fname = CString::new("a.txt").unwrap();
+        let fh = unsafe { zip_fopen(zh, fname.as_ptr(), 0) };
+        assert!(!fh.is_null());
+
+        // Initially no error.
+        let mut zep: c_int = -1;
+        let mut sep: c_int = -1;
+        unsafe { zip_file_error_get(fh, &mut zep, &mut sep) };
+        assert_eq!(zep, 0);
+
+        // Trigger a read error (null buffer) -> ZIP_ER_INVAL(18) on the file.
+        unsafe { zip_fread(fh, std::ptr::null_mut(), 4) };
+        unsafe { zip_file_error_get(fh, &mut zep, &mut sep) };
+        assert_eq!(zep, 18);
+        assert_eq!(sep, 0);
+
+        // zip_file_get_error returns a zip_error_t whose code/string match.
+        let ze = unsafe { zip_file_get_error(fh) };
+        assert!(!ze.is_null());
+        assert_eq!(unsafe { zip_error_code_zip(ze) }, 18);
+        assert_eq!(unsafe { zip_error_code_system(ze) }, 0);
+        assert_eq!(cstr(unsafe { zip_error_strerror(ze) }), "Invalid argument");
+
+        // Clear resets the file error to success.
+        unsafe { zip_file_error_clear(fh) };
+        unsafe { zip_file_error_get(fh, &mut zep, &mut sep) };
+        assert_eq!(zep, 0);
+        assert_eq!(unsafe { zip_error_code_zip(zip_file_get_error(fh)) }, 0);
+
+        unsafe { zip_fclose(fh) };
+        unsafe { zip_close(zh) };
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// TC-5: `zip_error_get_sys_type` returns the correct system-error type.
+    #[test]
+    fn error_get_sys_type() {
+        // OS-backed codes -> ZIP_ET_SYS.
+        assert_eq!(zip_error_get_sys_type(5), ZIP_ET_SYS); // Read
+        assert_eq!(zip_error_get_sys_type(11), ZIP_ET_SYS); // Open
+        // Zlib code.
+        assert_eq!(zip_error_get_sys_type(13), ZIP_ET_ZLIB);
+        // Libzip-inconsistent code.
+        assert_eq!(zip_error_get_sys_type(21), ZIP_ET_LIBZIP);
+        // Pure zip codes -> NONE.
+        assert_eq!(zip_error_get_sys_type(9), ZIP_ET_NONE); // Noent
+        assert_eq!(zip_error_get_sys_type(27), ZIP_ET_NONE); // Wrongpasswd
+        // Out-of-range / negative -> NONE, no panic.
+        assert_eq!(zip_error_get_sys_type(999), ZIP_ET_NONE);
+        assert_eq!(zip_error_get_sys_type(-5), ZIP_ET_NONE);
+    }
+
+    /// TC-6: no panic on malformed input for the Phase 7 entry points.
+    #[test]
+    fn phase7_malformed_no_panic() {
+        // NULL handles -> defined error / sentinel, no panic.
+        assert_eq!(unsafe { zip_get_archive_flag(std::ptr::null_mut(), ZIP_AFL_RDONLY, 0) }, -1);
+        assert_eq!(unsafe { zip_set_archive_flag(std::ptr::null_mut(), ZIP_AFL_RDONLY, 1) }, -1);
+        assert_eq!(unsafe { zip_unchange(std::ptr::null_mut(), 0) }, -1);
+        assert_eq!(unsafe { zip_unchange_all(std::ptr::null_mut()) }, -1);
+        assert_eq!(unsafe { zip_unchange_archive(std::ptr::null_mut()) }, -1);
+        assert_eq!(unsafe { zip_get_num_files(std::ptr::null_mut()) }, -1);
+        assert!(unsafe { zip_file_get_error(std::ptr::null_mut()) }.is_null());
+        unsafe { zip_file_error_clear(std::ptr::null_mut()) }; // no-op
+        unsafe { zip_file_error_get(std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) };
+        // NULL out-params are tolerated.
+        assert_eq!(zip_error_get_sys_type(13), ZIP_ET_ZLIB);
     }
 
     /// Build a small zip with one stored entry carrying an extra field, a file
@@ -6469,6 +6998,18 @@ mod tests {
             "zip_register_progress_callback",
             "zip_register_progress_callback_with_state",
             "zip_register_cancel_callback_with_state",
+            // Phase 7: archive flags, unchange*, method-query, file-error APIs.
+            "zip_get_archive_flag",
+            "zip_set_archive_flag",
+            "zip_unchange",
+            "zip_unchange_all",
+            "zip_unchange_archive",
+            "zip_compression_method_supported",
+            "zip_get_num_files",
+            "zip_file_error_clear",
+            "zip_file_error_get",
+            "zip_file_get_error",
+            "zip_error_get_sys_type",
         ] {
             let found: Result<libloading::Symbol<*mut libc::c_void>, _> =
                 unsafe { lib.get(sym.as_bytes()) };
