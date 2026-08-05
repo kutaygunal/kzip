@@ -1,4 +1,4 @@
-# LibzipInRust — COMPLETE-MIGRATION Verification Report
+# kzip — COMPLETE-MIGRATION Verification Report
 
 **Date:** 2024-08-04
 **Orchestrator:** complete-migration verification orchestrator

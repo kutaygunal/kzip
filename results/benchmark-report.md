@@ -1,4 +1,4 @@
-# LibzipInRust — Phase 5 §9.3 Benchmark Report (C libzip vs Rust zip-core)
+# kzip — Phase 5 §9.3 Benchmark Report (C libzip vs Rust zip-core)
 
 **Recorded:** 2026-08-04
 **Workload machine:** local Windows, MSVC release builds, 24 logical CPUs, 31.7 GB RAM.

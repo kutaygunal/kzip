@@ -1,4 +1,4 @@
-# LibzipInRust
+# kzip
 
 A from-scratch, memory-safe **Rust port of [libzip](https://libzip.org/)**: read,
 create, and modify ZIP archives with a familiar `zip_*`-style API, plus a drop-in

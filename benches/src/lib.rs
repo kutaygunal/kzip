@@ -1,4 +1,4 @@
-//! Benchmark crate for LibzipInRust.
+//! Benchmark crate for kzip.
 //!
 //! The criterion benchmarks live in `benches/`; this library target exists so
 //! the crate is a normal workspace member that `cargo test --workspace` can

@@ -21,8 +21,8 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.75"
 license = "BSD-3-Clause"
-authors = ["LibzipInRust contributors"]
-repository = "https://github.com/libzip-in-rust/libzip-in-rust"
+authors = ["kzip contributors"]
+repository = "https://github.com/kutaygunal/kzip"
 
 [workspace.dependencies]
 libc = "0.2"

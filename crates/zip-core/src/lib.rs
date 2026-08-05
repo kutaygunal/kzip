@@ -1,7 +1,7 @@
 //! # zip-core
 //!
 //! Safe Rust core engine for reading, creating, and modifying ZIP archives —
-//! the heart of the LibzipInRust project.
+//! the heart of the kzip project.
 //!
 //! `zip-core` is a from-scratch Rust port of [libzip](https://libzip.org/)
 //! that prioritizes **correctness and ZIP-format conformance**, memory safety,

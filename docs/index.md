@@ -1,4 +1,4 @@
-# LibzipInRust
+# kzip
 
 A commercial-grade, memory-safe Rust port of [libzip](https://libzip.org/),
 featuring:

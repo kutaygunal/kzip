@@ -1,4 +1,4 @@
-# LibzipInRust — C/Rust Equivalence Verification Report
+# kzip — C/Rust Equivalence Verification Report
 
 **Date:** 2024-08-04
 **Verification agent scope:** rigorous equivalence check between the original C

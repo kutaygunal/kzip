@@ -1,4 +1,4 @@
-# Migration Guide: libzip (C) → LibzipInRust (Rust)
+# Migration Guide: libzip (C) → kzip (Rust)
 
 This guide helps existing libzip C consumers migrate to the Rust port. There
 are two migration paths, depending on whether you can recompile:

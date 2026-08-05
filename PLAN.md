@@ -1,4 +1,4 @@
-# LibzipInRust — Commercial-Grade Rust Port of libzip
+# kzip — Commercial-Grade Rust Port of libzip
 
 **Status:** Planning (Draft v0.1)
 **Date:** 2026

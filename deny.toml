@@ -1,4 +1,4 @@
-# cargo-deny configuration for LibzipInRust.
+# cargo-deny configuration for kzip.
 # See https://embarkstudios.github.io/cargo-deny/. Applied by the `deny` CI job
 # (`cargo deny check bans|licenses|advisories`).
 #
