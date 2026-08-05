@@ -45,7 +45,7 @@ commits 29ddb0c/a2c4973/36dcc81/ee3b693 — do NOT re-assign. Loop starts at Pha
 | 5 | zip_open_from_source / zip_fdopen + write-mode sources | Low-Med | DONE | senior-engineer-5 | results/phase5-tests.md | 88a6ebc |
 | 6 | Progress & cancel callbacks | Low-Med | DONE | senior-engineer-6 | results/phase6-tests.md | afecbb6 |
 | 7 | Archive flags, unchange*, method-query, file-error APIs | Low-Med | DONE | senior-engineer-7 | results/phase7-tests.md | 6b032a4 |
-| 8 | Win32 sources + source utility helpers | Low-Med | DONE | senior-engineer | results/phase8-tests.md | |
+| 8 | Win32 sources + source utility helpers | Low-Med | DONE | senior-engineer-8 | results/phase8-tests.md | c1ccccf |
 
 ## Communication protocol
 
