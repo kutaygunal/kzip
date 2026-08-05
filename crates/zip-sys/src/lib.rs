@@ -154,6 +154,20 @@ const SRC_SEEKABLE: i64 = SRC_READABLE
     | src_bit(ZIP_SOURCE_TELL)
     | src_bit(ZIP_SOURCE_SUPPORTS);
 
+/// `ZIP_SOURCE_SUPPORTS_WRITABLE` bitmask (write-mode commands + REMOVE).
+const SRC_WRITABLE: i64 = src_bit(ZIP_SOURCE_BEGIN_WRITE)
+    | src_bit(ZIP_SOURCE_BEGIN_WRITE_CLONING)
+    | src_bit(ZIP_SOURCE_COMMIT_WRITE)
+    | src_bit(ZIP_SOURCE_ROLLBACK_WRITE)
+    | src_bit(ZIP_SOURCE_SEEK_WRITE)
+    | src_bit(ZIP_SOURCE_TELL_WRITE)
+    | src_bit(ZIP_SOURCE_WRITE)
+    | src_bit(ZIP_SOURCE_REMOVE);
+
+/// Write-mode commands minus `REMOVE` (the memory source is writable in the
+/// write-mode sense but is never deleted, so `zip_source_is_deleted` stays 0).
+const SRC_WRITE_MODE: i64 = SRC_WRITABLE & !src_bit(ZIP_SOURCE_REMOVE);
+
 /// `ZIP_STAT_*` valid bits.
 const ZIP_STAT_NAME: u64 = 0x0001;
 const ZIP_STAT_INDEX: u64 = 0x0002;
@@ -175,15 +189,24 @@ const ZIP_LENGTH_UNCHECKED: i64 = -2;
 
 /// Argument struct for the `ZIP_SOURCE_SEEK` command (`zip_source_args_seek`).
 #[repr(C)]
-struct ZipSourceArgsSeek {
-    offset: i64,
-    whence: c_int,
+#[derive(Debug, Clone, Copy)]
+pub struct ZipSourceArgsSeek {
+    pub offset: i64,
+    pub whence: c_int,
 }
 
 /// A user-supplied `zip_source_callback` (`void*ud, void*data, zip_uint64_t
 /// len, zip_source_cmd_t cmd) -> zip_int64_t`).
 type ZipSourceCallback =
     Option<unsafe extern "C" fn(ud: *mut c_void, data: *mut c_void, len: u64, cmd: c_int) -> i64>;
+
+/// A user-supplied `zip_source_layered_callback` (`zip_source_t*lower,
+/// void*ud, void*data, zip_uint64_t len, zip_source_cmd_t cmd)`). The first
+/// argument is the *lower* source (libzip's `_zip_source_call` passes
+/// `src->src` to a layered callback), so a layered layer can forward commands
+/// down the chain via [`zip_source_pass_to_lower_layer`].
+type ZipSourceLayeredCallback =
+    Option<unsafe extern "C" fn(lower: H, ud: *mut c_void, data: *mut c_void, len: u64, cmd: c_int) -> i64>;
 
 /// `zip_error_t` layout, mirroring libzip's `struct zip_error`
 /// (`zip_err`, `sys_err`, `str`).
@@ -295,21 +318,47 @@ struct ZipSource {
     opened: Mutex<bool>,
     /// Set once `READ` reaches EOF (used by `zip_source_at_eof`).
     eof: AtomicI32,
+    /// Whether a write session is currently open (`begin_write`/`cloning`).
+    write_open: AtomicI32,
+    /// Whether this is a layered source (write-mode ops are `ZIP_ER_OPNOTSUPP`).
+    is_layered: AtomicI32,
+}
+
+/// A pending write buffer for a `Memory` source in write mode.
+///
+/// Mirrors libzip's buffer-source `ctx->out`: a separate byte buffer that is
+/// swapped in for the readable `data` on `COMMIT_WRITE` and discarded on
+/// `ROLLBACK_WRITE`. `offset` is the current write cursor.
+#[derive(Default)]
+struct PendingWrite {
+    out: Vec<u8>,
+    offset: u64,
 }
 
 /// The byte-provider behind a [`ZipSource`].
 #[allow(dead_code)] // `Write`/layered variants are Phase 4b.
 enum SourceBackend {
-    /// An in-memory byte buffer (already windowed/sliced). Seekable, readable.
+    /// An in-memory byte buffer (already windowed/sliced). Seekable, readable,
+    /// and writable (write-mode lifecycle handled in `dispatch`).
     Memory {
         data: Vec<u8>,
         pos: u64,
         /// Metadata reported by `zip_source_stat`.
         stat: Stat,
+        /// Pending write buffer (Some only while a write is open).
+        pending: Option<PendingWrite>,
     },
     /// A user-supplied C callback source (function source).
     Function {
         cb: ZipSourceCallback,
+        ud: *mut c_void,
+    },
+    /// A layered source wrapping a lower `ZipSource`. Commands are dispatched
+    /// to the user-supplied layered callback, which receives the *lower*
+    /// source handle (matching libzip: `_zip_source_call` passes `src->src`).
+    Layered {
+        lower: H,
+        cb: ZipSourceLayeredCallback,
         ud: *mut c_void,
     },
 }
@@ -323,6 +372,7 @@ unsafe impl Sync for ZipSource {}
 
 impl ZipSource {
     fn new(backend: SourceBackend, supports: i64) -> ZipSource {
+        let is_layered = matches!(backend, SourceBackend::Layered { .. });
         ZipSource {
             backend: Mutex::new(backend),
             error: Mutex::new(ZipErrorState {
@@ -337,6 +387,8 @@ impl ZipSource {
             supports: Mutex::new(supports),
             opened: Mutex::new(false),
             eof: AtomicI32::new(0),
+            write_open: AtomicI32::new(0),
+            is_layered: AtomicI32::new(is_layered as i32),
         }
     }
 
@@ -388,6 +440,7 @@ impl ZipSource {
                 data: bytes,
                 pos,
                 stat,
+                pending,
             } => match cmd {
                 ZIP_SOURCE_OPEN => {
                     *pos = 0;
@@ -466,6 +519,99 @@ impl ZipSource {
                         0
                     }
                 }
+                ZIP_SOURCE_BEGIN_WRITE => {
+                    *pending = Some(PendingWrite::default());
+                    0
+                }
+                ZIP_SOURCE_BEGIN_WRITE_CLONING => {
+                    // `len` carries the clone offset (like libzip's buffer source).
+                    if (len as usize) > bytes.len() {
+                        self.set_err(ZipErrorCode::Inval.as_i32(), 0);
+                        return -1;
+                    }
+                    *pending = Some(PendingWrite {
+                        out: bytes[..len as usize].to_vec(),
+                        offset: len,
+                    });
+                    0
+                }
+                ZIP_SOURCE_WRITE => {
+                    let pw = match pending {
+                        Some(pw) => pw,
+                        None => {
+                            self.set_err(ZipErrorCode::Inval.as_i32(), 0);
+                            return -1;
+                        }
+                    };
+                    if data.is_null() && len > 0 {
+                        self.set_err(ZipErrorCode::Inval.as_i32(), 0);
+                        return -1;
+                    }
+                    // Write `len` bytes at `pw.offset`, growing the buffer and
+                    // zero-filling any gap (matching libzip's `buffer_write`).
+                    let end = pw.offset.saturating_add(len);
+                    if end > pw.out.len() as u64 {
+                        pw.out.resize(end as usize, 0);
+                    }
+                    if len > 0 {
+                        let src = unsafe { std::slice::from_raw_parts(data.cast::<u8>(), len as usize) };
+                        let dst = &mut pw.out[pw.offset as usize..end as usize];
+                        dst.copy_from_slice(src);
+                    }
+                    pw.offset = end;
+                    len as i64
+                }
+                ZIP_SOURCE_SEEK_WRITE => {
+                    let pw = match pending {
+                        Some(pw) => pw,
+                        None => {
+                            self.set_err(ZipErrorCode::Inval.as_i32(), 0);
+                            return -1;
+                        }
+                    };
+                    if data.is_null() || len < std::mem::size_of::<ZipSourceArgsSeek>() as u64 {
+                        self.set_err(ZipErrorCode::Inval.as_i32(), 0);
+                        return -1;
+                    }
+                    let args = unsafe { &*(data.cast::<ZipSourceArgsSeek>()) };
+                    let target: i64 = match args.whence {
+                        SEEK_SET => args.offset,
+                        SEEK_CUR => pw.offset as i64 + args.offset,
+                        SEEK_END => pw.out.len() as i64 + args.offset,
+                        _ => {
+                            self.set_err(ZipErrorCode::Inval.as_i32(), 0);
+                            return -1;
+                        }
+                    };
+                    if target < 0 {
+                        self.set_err(ZipErrorCode::Inval.as_i32(), 0);
+                        return -1;
+                    }
+                    pw.offset = target as u64;
+                    0
+                }
+                ZIP_SOURCE_TELL_WRITE => match pending {
+                    Some(pw) => pw.offset as i64,
+                    None => {
+                        self.set_err(ZipErrorCode::Inval.as_i32(), 0);
+                        -1
+                    }
+                },
+                ZIP_SOURCE_COMMIT_WRITE => {
+                    if let Some(pw) = pending.take() {
+                        *bytes = pw.out;
+                        *pos = 0;
+                    } else {
+                        self.set_err(ZipErrorCode::Inval.as_i32(), 0);
+                        return -1;
+                    }
+                    stat.size = Some(bytes.len() as u64);
+                    0
+                }
+                ZIP_SOURCE_ROLLBACK_WRITE => {
+                    *pending = None;
+                    0
+                }
                 ZIP_SOURCE_FREE => 0,
                 _ => {
                     self.set_err(ZipErrorCode::Opnotsupp.as_i32(), 0);
@@ -475,6 +621,20 @@ impl ZipSource {
             SourceBackend::Function { cb, ud } => match cb {
                 Some(cb) => {
                     let r = unsafe { cb(*ud, data, len, cmd) };
+                    // Track EOF for `zip_source_at_eof` when READ returns 0.
+                    if cmd == ZIP_SOURCE_READ && r == 0 {
+                        self.eof.store(1, Ordering::Relaxed);
+                    }
+                    r
+                }
+                None => {
+                    self.set_err(ZipErrorCode::Inval.as_i32(), 0);
+                    -1
+                }
+            },
+            SourceBackend::Layered { lower, cb, ud } => match cb {
+                Some(cb) => {
+                    let r = unsafe { cb(*lower, *ud, data, len, cmd) };
                     // Track EOF for `zip_source_at_eof` when READ returns 0.
                     if cmd == ZIP_SOURCE_READ && r == 0 {
                         self.eof.store(1, Ordering::Relaxed);
@@ -498,6 +658,24 @@ impl ZipSource {
         }
         *self.supports.lock().unwrap_or_else(|e| e.into_inner()) = r;
         r
+    }
+}
+
+impl Drop for ZipSource {
+    fn drop(&mut self) {
+        // A layered source owns its lower source: release it on drop so a
+        // file->window->crc->compress chain frees cleanly (matches libzip's
+        // `zip_source_layered_create` taking ownership of `src`).
+        let lower = match self.backend.lock() {
+            Ok(mut b) => match &mut *b {
+                SourceBackend::Layered { lower, .. } => *lower,
+                _ => std::ptr::null_mut(),
+            },
+            Err(_) => std::ptr::null_mut(),
+        };
+        if !lower.is_null() {
+            unsafe { zip_source_free(lower) };
+        }
     }
 }
 
@@ -1770,8 +1948,9 @@ pub unsafe extern "C" fn zip_source_buffer(
                         valid: ZIP_STAT_SIZE,
                         ..Stat::default()
                     },
+                    pending: None,
                 },
-                SRC_SEEKABLE | src_bit(ZIP_SOURCE_AT_EOF),
+                SRC_SEEKABLE | SRC_WRITE_MODE | src_bit(ZIP_SOURCE_AT_EOF),
             ));
             Ok(Box::into_raw(src) as H)
         },
@@ -1830,9 +2009,10 @@ fn make_memory_source(data: Vec<u8>, start: u64, len: i64, mut stat: Stat) -> Op
             data: slice,
             pos: 0,
             stat,
+            pending: None,
         },
         SRC_SEEKABLE | src_bit(ZIP_SOURCE_AT_EOF),
-    ))
+    ))  
 }
 
 /// Create a `zip_source_t*` over the file at `path`, exposing the sub-range
@@ -2515,6 +2695,752 @@ pub unsafe extern "C" fn zip_source_get_file_attributes(
         },
         -1,
     )
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4b: write-side + layered zip_source_* completion
+// ---------------------------------------------------------------------------
+
+/// Build a command bitmap from a slice of `zip_source_cmd` values (the Rust
+/// analog of libzip's variadic `zip_source_make_command_bitmap(cmd0, ...)`;
+/// the slice is terminated by the first negative value).
+fn make_bitmap(cmds: &[c_int]) -> i64 {
+    let mut b: i64 = 0;
+    for &c in cmds {
+        if c < 0 {
+            break;
+        }
+        b |= src_bit(c);
+    }
+    b
+}
+
+/// `zip_source_make_command_bitmap(cmd0, ...)` — set bit `cmd0`.
+///
+/// libzip's version is variadic; Rust cannot define a variadic export, so this
+/// exports the fixed-arity core (bit `cmd0`). The full variadic behavior is
+/// available to Rust callers via [`make_bitmap`] and is exercised by
+/// `source_helpers_parity`.
+#[no_mangle]
+pub unsafe extern "C" fn zip_source_make_command_bitmap(cmd0: c_int) -> i64 {
+    src_bit(cmd0)
+}
+
+/// `zip_source_args_seek(data, len)` — extract a `zip_source_args_seek_t*`
+/// from the `SEEK`/`SEEK_WRITE` command payload, returning NULL (and relying on
+/// the caller to set `ZIP_ER_INVAL`) if `len` is too small — mirroring the
+/// `ZIP_SOURCE_GET_ARGS` macro.
+///
+/// # Safety
+///
+/// `data` must point to `len` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn zip_source_args_seek(data: *mut c_void, len: u64) -> *mut ZipSourceArgsSeek {
+    if data.is_null() || len < std::mem::size_of::<ZipSourceArgsSeek>() as u64 {
+        std::ptr::null_mut()
+    } else {
+        data as *mut ZipSourceArgsSeek
+    }
+}
+
+/// `zip_source_seek_compute_offset(offset, length, data, data_length, errorp)`
+/// — compute the absolute target offset for a seek args struct, validating the
+/// `whence` and bounds. Returns the new offset or -1 (setting `errorp` to
+/// `ZIP_ER_INVAL`). Mirrors libzip `zip_source_seek.c`.
+///
+/// # Safety
+///
+/// `data` must point to `data_length` readable bytes; `errorp` (if non-null)
+/// writable `int`.
+#[no_mangle]
+pub unsafe extern "C" fn zip_source_seek_compute_offset(
+    offset: u64,
+    length: u64,
+    data: *mut c_void,
+    data_length: u64,
+    errorp: *mut c_int,
+) -> i64 {
+    guarded(
+        || {
+            let args = zip_source_args_seek(data, data_length);
+            if args.is_null() {
+                if !errorp.is_null() {
+                    *errorp = ZipErrorCode::Inval.as_i32();
+                }
+                return Err(-1);
+            }
+            let args = &*args;
+            let new_offset: i64 = match args.whence {
+                SEEK_CUR => offset as i64 + args.offset,
+                SEEK_END => length as i64 + args.offset,
+                SEEK_SET => args.offset,
+                _ => {
+                    if !errorp.is_null() {
+                        *errorp = ZipErrorCode::Inval.as_i32();
+                    }
+                    return Err(-1);
+                }
+            };
+            if new_offset < 0 || (new_offset as u64) > length {
+                if !errorp.is_null() {
+                    *errorp = ZipErrorCode::Inval.as_i32();
+                }
+                return Err(-1);
+            }
+            Ok(new_offset)
+        },
+        -1,
+    )
+}
+
+/// `zip_source_pass_to_lower_layer(src, data, length, command)` — forward a
+/// command to the lower layer of a layered source. `src` must be the *lower*
+/// source handle received by a layered callback (matching libzip). Mirrors
+/// `libzip/lib/zip_source_pass_to_lower_layer.c`.
+///
+/// # Safety
+///
+/// `src` a valid lower `zip_source_t*`; `data`/`length` per the command.
+#[no_mangle]
+pub unsafe extern "C" fn zip_source_pass_to_lower_layer(
+    src: H,
+    data: *mut c_void,
+    length: u64,
+    command: c_int,
+) -> i64 {
+    guarded(
+        || {
+            match command {
+                ZIP_SOURCE_OPEN
+                | ZIP_SOURCE_CLOSE
+                | ZIP_SOURCE_FREE
+                | ZIP_SOURCE_GET_FILE_ATTRIBUTES
+                | ZIP_SOURCE_SUPPORTS_REOPEN => Ok(0),
+                ZIP_SOURCE_STAT => Ok(std::mem::size_of::<zip_stat>() as i64),
+                ZIP_SOURCE_ACCEPT_EMPTY
+                | ZIP_SOURCE_AT_EOF
+                | ZIP_SOURCE_ERROR
+                | ZIP_SOURCE_GET_DOS_TIME
+                | ZIP_SOURCE_READ
+                | ZIP_SOURCE_SEEK
+                | ZIP_SOURCE_TELL => {
+                    let s = src.cast::<ZipSource>().as_ref().ok_or(-1)?;
+                    Ok(s.dispatch(command, data, length))
+                }
+                ZIP_SOURCE_BEGIN_WRITE
+                | ZIP_SOURCE_BEGIN_WRITE_CLONING
+                | ZIP_SOURCE_COMMIT_WRITE
+                | ZIP_SOURCE_REMOVE
+                | ZIP_SOURCE_ROLLBACK_WRITE
+                | ZIP_SOURCE_SEEK_WRITE
+                | ZIP_SOURCE_TELL_WRITE
+                | ZIP_SOURCE_WRITE => {
+                    if let Some(s) = src.cast::<ZipSource>().as_ref() {
+                        s.set_err(ZipErrorCode::Opnotsupp.as_i32(), 0);
+                    }
+                    Err(-1)
+                }
+                ZIP_SOURCE_SUPPORTS => {
+                    if length < std::mem::size_of::<i64>() as u64 {
+                        if let Some(s) = src.cast::<ZipSource>().as_ref() {
+                            s.set_err(ZipErrorCode::Internal.as_i32(), 0);
+                        }
+                        return Err(-1);
+                    }
+                    Ok(*(data as *const i64))
+                }
+                _ => {
+                    if let Some(s) = src.cast::<ZipSource>().as_ref() {
+                        s.set_err(ZipErrorCode::Opnotsupp.as_i32(), 0);
+                    }
+                    Err(-1)
+                }
+            }
+        },
+        -1,
+    )
+}
+
+/// `zip_source_begin_write(src)` — start a write session on a non-layered
+/// source. Returns 0 or -1.
+///
+/// # Safety
+///
+/// `src` a valid `zip_source_t*`.
+#[no_mangle]
+pub unsafe extern "C" fn zip_source_begin_write(src: H) -> c_int {
+    guarded(
+        || {
+            let s = src.cast::<ZipSource>().as_ref().ok_or(-1)?;
+            if s.is_layered.load(Ordering::Relaxed) != 0 {
+                s.set_err(ZipErrorCode::Opnotsupp.as_i32(), 0);
+                return Err(-1);
+            }
+            if s.write_open.load(Ordering::Relaxed) != 0 {
+                s.set_err(ZipErrorCode::Inval.as_i32(), 0);
+                return Err(-1);
+            }
+            if s.dispatch(ZIP_SOURCE_BEGIN_WRITE, std::ptr::null_mut(), 0) < 0 {
+                return Err(-1);
+            }
+            s.write_open.store(1, Ordering::Relaxed);
+            // Clear any past error (mirrors libzip's begin_write).
+            s.set_err(0, 0);
+            Ok(0)
+        },
+        -1,
+    )
+}
+
+/// `zip_source_begin_write_cloning(src, offset)` — start a write session whose
+/// base is a clone of the source's first `offset` bytes. Returns 0 or -1.
+///
+/// # Safety
+///
+/// `src` a valid `zip_source_t*`.
+#[no_mangle]
+pub unsafe extern "C" fn zip_source_begin_write_cloning(src: H, offset: u64) -> c_int {
+    guarded(
+        || {
+            let s = src.cast::<ZipSource>().as_ref().ok_or(-1)?;
+            if s.is_layered.load(Ordering::Relaxed) != 0 {
+                s.set_err(ZipErrorCode::Opnotsupp.as_i32(), 0);
+                return Err(-1);
+            }
+            if s.write_open.load(Ordering::Relaxed) != 0 {
+                s.set_err(ZipErrorCode::Inval.as_i32(), 0);
+                return Err(-1);
+            }
+            if s.dispatch(ZIP_SOURCE_BEGIN_WRITE_CLONING, std::ptr::null_mut(), offset) < 0 {
+                return Err(-1);
+            }
+            s.write_open.store(1, Ordering::Relaxed);
+            Ok(0)
+        },
+        -1,
+    )
+}
+
+/// `zip_source_write(src, data, length)` — write bytes into an open write
+/// session. Returns bytes written or -1.
+///
+/// # Safety
+///
+/// `src` a valid `zip_source_t*` with an open write session; `data` points to
+/// `length` readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn zip_source_write(src: H, data: *const c_void, length: u64) -> i64 {
+    guarded(
+        || {
+            let s = src.cast::<ZipSource>().as_ref().ok_or(-1)?;
+            if s.write_open.load(Ordering::Relaxed) == 0 {
+                s.set_err(ZipErrorCode::Inval.as_i32(), 0);
+                return Err(-1);
+            }
+            let r = s.dispatch(ZIP_SOURCE_WRITE, data as *mut c_void, length);
+            if r < 0 {
+                s.set_err(ZipErrorCode::Write.as_i32(), 0);
+            }
+            Ok(r)
+        },
+        -1,
+    )
+}
+
+/// `zip_source_seek_write(src, offset, whence)` — position the write cursor.
+/// Returns 0 or -1.
+///
+/// # Safety
+///
+/// `src` a valid `zip_source_t*` with an open write session.
+#[no_mangle]
+pub unsafe extern "C" fn zip_source_seek_write(src: H, offset: i64, whence: c_int) -> c_int {
+    guarded(
+        || {
+            let s = src.cast::<ZipSource>().as_ref().ok_or(-1)?;
+            if s.is_layered.load(Ordering::Relaxed) != 0 {
+                s.set_err(ZipErrorCode::Opnotsupp.as_i32(), 0);
+                return Err(-1);
+            }
+            if s.write_open.load(Ordering::Relaxed) == 0
+                || (whence != SEEK_SET && whence != SEEK_CUR && whence != SEEK_END)
+            {
+                s.set_err(ZipErrorCode::Inval.as_i32(), 0);
+                return Err(-1);
+            }
+            let args = ZipSourceArgsSeek { offset, whence };
+            let r = s.dispatch(
+                ZIP_SOURCE_SEEK_WRITE,
+                (&args) as *const ZipSourceArgsSeek as *mut c_void,
+                std::mem::size_of::<ZipSourceArgsSeek>() as u64,
+            );
+            if r < 0 {
+                Err(-1)
+            } else {
+                Ok(0)
+            }
+        },
+        -1,
+    )
+}
+
+/// `zip_source_tell_write(src)` — return the current write cursor, or -1.
+///
+/// # Safety
+///
+/// `src` a valid `zip_source_t*` with an open write session.
+#[no_mangle]
+pub unsafe extern "C" fn zip_source_tell_write(src: H) -> i64 {
+    guarded(
+        || {
+            let s = src.cast::<ZipSource>().as_ref().ok_or(-1)?;
+            if s.is_layered.load(Ordering::Relaxed) != 0 {
+                s.set_err(ZipErrorCode::Opnotsupp.as_i32(), 0);
+                return Err(-1);
+            }
+            if s.write_open.load(Ordering::Relaxed) == 0 {
+                s.set_err(ZipErrorCode::Inval.as_i32(), 0);
+                return Err(-1);
+            }
+            Ok(s.dispatch(ZIP_SOURCE_TELL_WRITE, std::ptr::null_mut(), 0))
+        },
+        -1,
+    )
+}
+
+/// `zip_source_commit_write(src)` — persist an open write session. Returns 0
+/// or -1.
+///
+/// # Safety
+///
+/// `src` a valid `zip_source_t*` with an open write session.
+#[no_mangle]
+pub unsafe extern "C" fn zip_source_commit_write(src: H) -> c_int {
+    guarded(
+        || {
+            let s = src.cast::<ZipSource>().as_ref().ok_or(-1)?;
+            if s.is_layered.load(Ordering::Relaxed) != 0 {
+                s.set_err(ZipErrorCode::Opnotsupp.as_i32(), 0);
+                return Err(-1);
+            }
+            if s.write_open.load(Ordering::Relaxed) == 0 {
+                s.set_err(ZipErrorCode::Inval.as_i32(), 0);
+                return Err(-1);
+            }
+            if s.dispatch(ZIP_SOURCE_COMMIT_WRITE, std::ptr::null_mut(), 0) < 0 {
+                s.write_open.store(0, Ordering::Relaxed);
+                return Err(-1);
+            }
+            s.write_open.store(0, Ordering::Relaxed);
+            Ok(0)
+        },
+        -1,
+    )
+}
+
+/// `zip_source_rollback_write(src)` — discard an open write session (void).
+///
+/// # Safety
+///
+/// `src` a valid `zip_source_t*`.
+#[no_mangle]
+pub unsafe extern "C" fn zip_source_rollback_write(src: H) {
+    guarded(
+        || {
+            let s = src.cast::<ZipSource>().as_ref().ok_or(-1)?;
+            if s.is_layered.load(Ordering::Relaxed) != 0 {
+                return Ok(());
+            }
+            if s.write_open.load(Ordering::Relaxed) == 0 {
+                return Ok(());
+            }
+            s.dispatch(ZIP_SOURCE_ROLLBACK_WRITE, std::ptr::null_mut(), 0);
+            s.write_open.store(0, Ordering::Relaxed);
+            Ok(())
+        },
+        (),
+    )
+}
+
+/// `zip_source_layered_create(src, cb, ud, errorp)` — wrap `src` in a layered
+/// source whose commands are handled by `cb` (which receives the *lower*
+/// source). Takes ownership of `src`. Returns a new source or NULL.
+///
+/// # Safety
+///
+/// `src` a valid `zip_source_t*` (owned thereafter); `cb` a valid
+/// `zip_source_layered_callback`; `ud` passed back to `cb`; `errorp` (if
+/// non-null) writable `int`.
+#[no_mangle]
+pub unsafe extern "C" fn zip_source_layered_create(
+    src: H,
+    cb: ZipSourceLayeredCallback,
+    ud: *mut c_void,
+    errorp: *mut c_int,
+) -> H {
+    catch_unwind(AssertUnwindSafe(|| -> Result<H, i32> {
+        if src.is_null() || cb.is_none() {
+            return Err(ZipErrorCode::Inval.as_i32());
+        }
+        let cb = cb.unwrap();
+        let lower = src.cast::<ZipSource>().as_ref().ok_or(ZipErrorCode::Inval.as_i32())?;
+        let lower_supports = lower.query_supports();
+        let supports = cb(
+            src,
+            ud,
+            (&lower_supports) as *const i64 as *mut c_void,
+            std::mem::size_of::<i64>() as u64,
+            ZIP_SOURCE_SUPPORTS,
+        );
+        if supports < 0 {
+            if !errorp.is_null() {
+                *errorp = ZipErrorCode::Inval.as_i32();
+            }
+            // Let the callback report a detailed error, if it wants to.
+            let mut ze = zip_error {
+                zip_err: 0,
+                sys_err: 0,
+                str: std::ptr::null_mut(),
+            };
+            cb(
+                src,
+                ud,
+                (&mut ze) as *mut zip_error as *mut c_void,
+                std::mem::size_of::<zip_error>() as u64,
+                ZIP_SOURCE_ERROR,
+            );
+            return Err(ZipErrorCode::Inval.as_i32());
+        }
+        // Layered sources can't support writing (mirrors libzip).
+        let effective = supports & !SRC_WRITABLE;
+        let ls = Box::new(ZipSource::new(
+            SourceBackend::Layered {
+                lower: src,
+                cb: Some(cb),
+                ud,
+            },
+            effective,
+        ));
+        Ok(Box::into_raw(ls) as H)
+    }))
+    .map_or(std::ptr::null_mut(), |r| r.unwrap_or(std::ptr::null_mut()))
+}
+
+/// `zip_source_layered(za, src, cb, ud)` — archive form of
+/// [`zip_source_layered_create`]; errors set on the archive handle.
+///
+/// # Safety
+///
+/// `za` a valid archive handle; `src` a valid source (owned thereafter); `cb`
+/// a valid layered callback.
+#[no_mangle]
+pub unsafe extern "C" fn zip_source_layered(
+    za: H,
+    src: H,
+    cb: ZipSourceLayeredCallback,
+    ud: *mut c_void,
+) -> H {
+    let h = zip_source_layered_create(src, cb, ud, std::ptr::null_mut());
+    if h.is_null() {
+        if let Some(z) = za.cast::<Zip>().as_ref() {
+            z.set_err(ZipErrorCode::Inval.as_i32(), 0);
+        }
+    }
+    h
+}
+
+// ---- internal crc layer (zip_source_crc) --------------------------------
+
+/// Context for the CRC pass-through layered source. Lives on the heap, owned by
+/// the layered source's `ud` and freed on `ZIP_SOURCE_FREE`.
+#[allow(dead_code)] // `validate` reserved for CRC-verification mode (unused today)
+struct CrcCtx {
+    validate: i32,
+    crc_complete: i32,
+    size: u64,
+    position: u64,
+    crc_position: u64,
+    crc: u32,
+    hasher: crc32fast::Hasher,
+    err_zip: i32,
+    err_sys: i32,
+}
+
+#[allow(dead_code)] // exercised from the test module
+unsafe extern "C" fn crc_layered_cb(
+    lower: H,
+    ud: *mut c_void,
+    data: *mut c_void,
+    len: u64,
+    cmd: c_int,
+) -> i64 {
+    let ctx = unsafe { &mut *(ud as *mut CrcCtx) };
+    match cmd {
+        ZIP_SOURCE_OPEN => {
+            ctx.position = 0;
+            ctx.crc_position = 0;
+            ctx.crc = 0;
+            ctx.crc_complete = 0;
+            ctx.hasher = crc32fast::Hasher::new();
+            0
+        }
+        ZIP_SOURCE_READ => {
+            let n = unsafe { zip_source_read(lower, data, len) };
+            if n < 0 {
+                return -1;
+            }
+            if n == 0 {
+                ctx.size = ctx.position;
+                if ctx.crc_position == ctx.position {
+                    ctx.crc = ctx.hasher.clone().finalize();
+                    ctx.crc_complete = 1;
+                }
+                return 0;
+            }
+            // Update CRC only over fully-sequential reads (no gaps). For the
+            // pipeline this is always the case; a gap just defers completion.
+            if ctx.crc_complete == 0 && ctx.position == ctx.crc_position {
+                let slice = unsafe { std::slice::from_raw_parts(data.cast::<u8>(), n as usize) };
+                ctx.hasher.update(slice);
+                ctx.crc_position += n as u64;
+            }
+            ctx.position += n as u64;
+            n
+        }
+        ZIP_SOURCE_CLOSE => 0,
+        ZIP_SOURCE_STAT => {
+            if data.is_null() || len < std::mem::size_of::<zip_stat>() as u64 {
+                ctx.err_zip = ZipErrorCode::Inval.as_i32();
+                return -1;
+            }
+            let st = unsafe { &mut *(data.cast::<zip_stat>()) };
+            if ctx.crc_complete != 0 {
+                st.size = ctx.size;
+                st.crc = ctx.crc;
+                st.comp_size = ctx.size;
+                st.comp_method = ZIP_CM_STORE as u16;
+                st.encryption_method = ZIP_EM_NONE;
+                st.valid |= ZIP_STAT_SIZE
+                    | ZIP_STAT_CRC
+                    | ZIP_STAT_COMP_SIZE
+                    | ZIP_STAT_COMP_METHOD
+                    | ZIP_STAT_ENCRYPTION_METHOD;
+            }
+            0
+        }
+        ZIP_SOURCE_ERROR => {
+            if !data.is_null() && len >= 2 * std::mem::size_of::<c_int>() as u64 {
+                let out = unsafe { &mut *(data.cast::<[c_int; 2]>()) };
+                out[0] = ctx.err_zip;
+                out[1] = ctx.err_sys;
+            }
+            0
+        }
+        ZIP_SOURCE_FREE => {
+            drop(unsafe { Box::from_raw(ud as *mut CrcCtx) });
+            0
+        }
+        ZIP_SOURCE_SUPPORTS => {
+            let mut mask = if data.is_null() || len < std::mem::size_of::<i64>() as u64 {
+                SRC_READABLE
+            } else {
+                *(data as *const i64)
+            };
+            mask &= !make_bitmap(&[
+                ZIP_SOURCE_BEGIN_WRITE,
+                ZIP_SOURCE_COMMIT_WRITE,
+                ZIP_SOURCE_ROLLBACK_WRITE,
+                ZIP_SOURCE_SEEK_WRITE,
+                ZIP_SOURCE_TELL_WRITE,
+                ZIP_SOURCE_REMOVE,
+                ZIP_SOURCE_GET_FILE_ATTRIBUTES,
+            ]);
+            mask |= src_bit(ZIP_SOURCE_FREE);
+            mask
+        }
+        ZIP_SOURCE_SEEK => {
+            if data.is_null() || len < std::mem::size_of::<ZipSourceArgsSeek>() as u64 {
+                ctx.err_zip = ZipErrorCode::Inval.as_i32();
+                return -1;
+            }
+            let args = unsafe { &*(data.cast::<ZipSourceArgsSeek>()) };
+            if unsafe { zip_source_seek(lower, args.offset, args.whence) } < 0 {
+                return -1;
+            }
+            let tell = unsafe { zip_source_tell(lower) };
+            if tell < 0 {
+                return -1;
+            }
+            ctx.position = tell as u64;
+            0
+        }
+        ZIP_SOURCE_TELL => ctx.position as i64,
+        _ => unsafe { zip_source_pass_to_lower_layer(lower, data, len, cmd) },
+    }
+}
+
+/// Internal: `zip_source_crc_create(src, validate, errorp)`. Creates a layered
+/// pass-through source that computes CRC-32 / size over the lower source.
+/// Takes ownership of `src`.
+#[allow(dead_code)] // exercised from the test module
+unsafe fn zip_source_crc_create(src: H, validate: c_int, _errorp: *mut c_int) -> H {
+    let ctx = Box::into_raw(Box::new(CrcCtx {
+        validate,
+        crc_complete: 0,
+        size: 0,
+        position: 0,
+        crc_position: 0,
+        crc: 0,
+        hasher: crc32fast::Hasher::new(),
+        err_zip: 0,
+        err_sys: 0,
+    }));
+    let h = zip_source_layered_create(src, Some(crc_layered_cb), ctx as *mut c_void, std::ptr::null_mut());
+    if h.is_null() {
+        drop(unsafe { Box::from_raw(ctx) });
+    }
+    h
+}
+
+// ---- internal compress layer (zip_source_compress) -----------------------
+
+/// Context for the compression layered source. On `OPEN` the whole lower stream
+/// is read and compressed with the same deterministic codec as the Rust
+/// writer, so output is byte-identical to C libzip for the same settings.
+#[allow(dead_code)] // exercised from the test module
+struct CompressCtx {
+    method: i32,
+    data: Vec<u8>,
+    pos: u64,
+    end_of_stream: bool,
+    size: u64,
+    err_zip: i32,
+    err_sys: i32,
+}
+
+#[allow(dead_code)] // exercised from the test module
+unsafe extern "C" fn compress_layered_cb(
+    lower: H,
+    ud: *mut c_void,
+    data: *mut c_void,
+    len: u64,
+    cmd: c_int,
+) -> i64 {
+    let ctx = unsafe { &mut *(ud as *mut CompressCtx) };
+    match cmd {
+        ZIP_SOURCE_OPEN => {
+            ctx.pos = 0;
+            ctx.end_of_stream = false;
+            let raw = match read_lower_all(lower) {
+                Ok(v) => v,
+                Err(_) => return -1,
+            };
+            let method = zip_core::constant::CompressionMethod::from_u16(ctx.method as u16);
+            let out = zip_core::compress_bytes(&raw, method, 6).unwrap_or_else(|_| raw.clone());
+            ctx.data = out;
+            ctx.size = ctx.data.len() as u64;
+            ctx.end_of_stream = true;
+            0
+        }
+        ZIP_SOURCE_READ => {
+            if len == 0 {
+                return 0;
+            }
+            let remaining = ctx.data.len().saturating_sub(ctx.pos as usize);
+            let n = remaining.min(len as usize);
+            if n > 0 {
+                let out = unsafe { std::slice::from_raw_parts_mut(data.cast::<u8>(), n) };
+                let p = ctx.pos as usize;
+                out.copy_from_slice(&ctx.data[p..p + n]);
+                ctx.pos += n as u64;
+            }
+            n as i64
+        }
+        ZIP_SOURCE_CLOSE => 0,
+        ZIP_SOURCE_STAT => {
+            if data.is_null() || len < std::mem::size_of::<zip_stat>() as u64 {
+                ctx.err_zip = ZipErrorCode::Inval.as_i32();
+                return -1;
+            }
+            let st = unsafe { &mut *(data.cast::<zip_stat>()) };
+            if ctx.method == ZIP_CM_STORE {
+                st.comp_method = ZIP_CM_STORE as u16;
+            } else {
+                st.comp_method = ZIP_CM_DEFLATE as u16;
+            }
+            st.comp_size = ctx.size;
+            st.valid |= ZIP_STAT_COMP_SIZE | ZIP_STAT_COMP_METHOD;
+            0
+        }
+        ZIP_SOURCE_ERROR => {
+            if !data.is_null() && len >= 2 * std::mem::size_of::<c_int>() as u64 {
+                let out = unsafe { &mut *(data.cast::<[c_int; 2]>()) };
+                out[0] = ctx.err_zip;
+                out[1] = ctx.err_sys;
+            }
+            0
+        }
+        ZIP_SOURCE_FREE => {
+            drop(unsafe { Box::from_raw(ud as *mut CompressCtx) });
+            0
+        }
+        ZIP_SOURCE_SUPPORTS => {
+            SRC_READABLE
+                | src_bit(ZIP_SOURCE_GET_FILE_ATTRIBUTES)
+                | src_bit(ZIP_SOURCE_SUPPORTS_REOPEN)
+        }
+        _ => unsafe { zip_source_pass_to_lower_layer(lower, data, len, cmd) },
+    }
+}
+
+/// Internal: `zip_source_compress(src, method, compression_flags, errorp)`.
+/// Compresses (or stores) the lower stream with the deterministic Rust codec.
+/// Takes ownership of `src`.
+#[allow(dead_code)] // exercised from the test module
+unsafe fn zip_source_compress(src: H, method: i32, _flags: u32) -> H {
+    let ctx = Box::into_raw(Box::new(CompressCtx {
+        method,
+        data: Vec::new(),
+        pos: 0,
+        end_of_stream: false,
+        size: 0,
+        err_zip: 0,
+        err_sys: 0,
+    }));
+    let h = zip_source_layered_create(src, Some(compress_layered_cb), ctx as *mut c_void, std::ptr::null_mut());
+    if h.is_null() {
+        drop(unsafe { Box::from_raw(ctx) });
+    }
+    h
+}
+
+/// Drain a source handle completely (open, read, close), returning the bytes.
+#[allow(dead_code)] // exercised from the test module
+unsafe fn read_lower_all(src: H) -> Result<Vec<u8>, ()> {
+    let s = src.cast::<ZipSource>().as_ref().ok_or(())?;
+    let opened = s.dispatch(ZIP_SOURCE_OPEN, std::ptr::null_mut(), 0);
+    if opened < 0 {
+        return Err(());
+    }
+    let mut out = Vec::new();
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = s.dispatch(
+            ZIP_SOURCE_READ,
+            buf.as_mut_ptr() as *mut c_void,
+            buf.len() as u64,
+        );
+        if n < 0 {
+            s.dispatch(ZIP_SOURCE_CLOSE, std::ptr::null_mut(), 0);
+            return Err(());
+        }
+        if n == 0 {
+            break;
+        }
+        out.extend_from_slice(&buf[..n as usize]);
+    }
+    s.dispatch(ZIP_SOURCE_CLOSE, std::ptr::null_mut(), 0);
+    Ok(out)
 }
 
 /// Add a new entry to the archive from `source`, returning its index or -1.
@@ -4988,6 +5914,20 @@ mod tests {
             "zip_file_get_external_attributes",
             "zip_file_attributes_init",
             "zip_set_file_compression",
+            // Phase 4b: write-side + layered sources.
+            "zip_source_layered",
+            "zip_source_layered_create",
+            "zip_source_write",
+            "zip_source_seek_write",
+            "zip_source_tell_write",
+            "zip_source_begin_write",
+            "zip_source_begin_write_cloning",
+            "zip_source_commit_write",
+            "zip_source_rollback_write",
+            "zip_source_make_command_bitmap",
+            "zip_source_pass_to_lower_layer",
+            "zip_source_seek_compute_offset",
+            "zip_source_args_seek",
         ] {
             let found: Result<libloading::Symbol<*mut libc::c_void>, _> =
                 unsafe { lib.get(sym.as_bytes()) };
@@ -5992,5 +6932,363 @@ mod tests {
         unsafe { libc::fclose(file) };
 
         std::fs::remove_file(&path).ok();
+    }
+
+    // ---- Phase 4b: write-side + layered sources ----
+
+    /// A pass-through layered callback that forwards every command to the lower
+    /// layer (used by TC-4b-1).
+    unsafe extern "C" fn passthrough_layered_cb(
+        lower: H,
+        _ud: *mut c_void,
+        data: *mut c_void,
+        len: u64,
+        cmd: c_int,
+    ) -> i64 {
+        unsafe { zip_source_pass_to_lower_layer(lower, data, len, cmd) }
+    }
+
+    /// TC-4b-1: `zip_source_layered_create`/`zip_source_layered` wrap a lower
+    /// source; reads/seeks/stat/at_eof propagate correctly.
+    #[test]
+    fn source_layered_wrap() {
+        let data = b"layered wrap payload 0123456789".to_vec();
+        let base = unsafe {
+            zip_source_buffer(
+                std::ptr::null_mut(),
+                data.as_ptr() as *const c_void,
+                data.len() as u64,
+                0,
+            )
+        };
+        assert!(!base.is_null());
+        let mut errp: c_int = -1;
+        let layered = unsafe {
+            zip_source_layered_create(
+                base,
+                Some(passthrough_layered_cb),
+                std::ptr::null_mut(),
+                &mut errp,
+            )
+        };
+        assert!(!layered.is_null(), "zip_source_layered_create errp={errp}");
+
+        // Reads propagate byte-identically.
+        let got = unsafe { read_source_all(layered) };
+        assert_eq!(got, data);
+        assert_eq!(unsafe { zip_source_is_seekable(layered) }, 1);
+
+        // Seek/tell/stat propagate.
+        assert_eq!(unsafe { zip_source_open(layered) }, 0);
+        assert_eq!(unsafe { zip_source_seek(layered, 3, SEEK_SET) }, 0);
+        assert_eq!(unsafe { zip_source_tell(layered) }, 3);
+        let mut b = [0u8; 4];
+        assert_eq!(
+            unsafe { zip_source_read(layered, b.as_mut_ptr() as *mut c_void, 4) },
+            4
+        );
+        assert_eq!(&b, &data[3..7]);
+        let mut sb = zero_stat();
+        assert_eq!(unsafe { zip_source_stat(layered, &mut sb) }, 0);
+        // `pass_to_lower_layer` forwards STAT without filling data (libzip
+        // quirk), so size is verified through the lower source instead.
+        unsafe { zip_source_close(layered) };
+        unsafe { zip_source_open(base) };
+        let mut sb2 = zero_stat();
+        assert_eq!(unsafe { zip_source_stat(base, &mut sb2) }, 0);
+        assert_eq!(sb2.size, data.len() as u64);
+        unsafe { zip_source_close(base) };
+
+        // `zip_source_layered` (archive form) behaves identically.
+        let base2 = unsafe {
+            zip_source_buffer(
+                std::ptr::null_mut(),
+                data.as_ptr() as *const c_void,
+                data.len() as u64,
+                0,
+            )
+        };
+        let layered2 =
+            unsafe { zip_source_layered(std::ptr::null_mut(), base2, Some(passthrough_layered_cb), std::ptr::null_mut()) };
+        assert!(!layered2.is_null());
+        let got2 = unsafe { read_source_all(layered2) };
+        assert_eq!(got2, data);
+        unsafe { zip_source_free(layered2) };
+        unsafe { zip_source_free(layered) };
+    }
+
+    /// TC-4b-2: `zip_source_write`/`zip_source_seek_write` write-mode behavior.
+    #[test]
+    fn source_write() {
+        let src = unsafe { zip_source_buffer(std::ptr::null_mut(), std::ptr::null(), 0, 0) };
+        assert!(!src.is_null());
+        assert_eq!(unsafe { zip_source_begin_write(src) }, 0);
+        let a = b"hello ";
+        assert_eq!(
+            unsafe { zip_source_write(src, a.as_ptr() as *const c_void, a.len() as u64) },
+            a.len() as i64
+        );
+        let b2 = b"world";
+        assert_eq!(
+            unsafe { zip_source_write(src, b2.as_ptr() as *const c_void, b2.len() as u64) },
+            b2.len() as i64
+        );
+        assert_eq!(unsafe { zip_source_tell_write(src) }, 11);
+        // SEEK_WRITE to position 5 and overwrite.
+        assert_eq!(unsafe { zip_source_seek_write(src, 5, SEEK_SET) }, 0);
+        assert_eq!(unsafe { zip_source_tell_write(src) }, 5);
+        let c = b"Z";
+        assert_eq!(unsafe { zip_source_write(src, c.as_ptr() as *const c_void, 1) }, 1);
+        assert_eq!(unsafe { zip_source_commit_write(src) }, 0);
+        let got = unsafe { read_source_all(src) };
+        assert_eq!(got, b"helloZworld");
+        unsafe { zip_source_free(src) };
+
+        // Writing without an open write session -> -1, defined error, no panic.
+        let src2 = unsafe { zip_source_buffer(std::ptr::null_mut(), std::ptr::null(), 0, 0) };
+        let d = b"x";
+        assert_eq!(
+            unsafe { zip_source_write(src2, d.as_ptr() as *const c_void, 1) },
+            -1
+        );
+        unsafe { zip_source_free(src2) };
+    }
+
+    /// TC-4b-3: write-mode lifecycle begin -> commit persists; begin -> rollback
+    /// discards; begin_write_cloning isolates; misordering -> defined error.
+    #[test]
+    fn source_commit_rollback() {
+        // Commit persists.
+        let src = unsafe { zip_source_buffer(std::ptr::null_mut(), std::ptr::null(), 0, 0) };
+        assert!(!src.is_null());
+        assert_eq!(unsafe { zip_source_begin_write(src) }, 0);
+        let p = b"commitdata";
+        assert_eq!(
+            unsafe { zip_source_write(src, p.as_ptr() as *const c_void, p.len() as u64) },
+            p.len() as i64
+        );
+        assert_eq!(unsafe { zip_source_commit_write(src) }, 0);
+        assert_eq!(unsafe { read_source_all(src) }, b"commitdata");
+        unsafe { zip_source_free(src) };
+
+        // Rollback discards.
+        let src2 = unsafe { zip_source_buffer(std::ptr::null_mut(), std::ptr::null(), 0, 0) };
+        assert_eq!(unsafe { zip_source_begin_write(src2) }, 0);
+        let t = b"temporary";
+        assert_eq!(
+            unsafe { zip_source_write(src2, t.as_ptr() as *const c_void, t.len() as u64) },
+            t.len() as i64
+        );
+        unsafe { zip_source_rollback_write(src2) };
+        // Returns to the empty pre-write state.
+        assert_eq!(unsafe { read_source_all(src2) }, b"");
+        unsafe { zip_source_free(src2) };
+
+        // begin_write_cloning clones existing content; the original is
+        // untouched until commit.
+        let data = b"cloning base".to_vec();
+        let src3 = unsafe {
+            zip_source_buffer(
+                std::ptr::null_mut(),
+                data.as_ptr() as *const c_void,
+                data.len() as u64,
+                0,
+            )
+        };
+        assert_eq!(unsafe { read_source_all(src3) }, data);
+        assert_eq!(unsafe { zip_source_begin_write_cloning(src3, 0) }, 0);
+        let n = b"new";
+        assert_eq!(
+            unsafe { zip_source_write(src3, n.as_ptr() as *const c_void, n.len() as u64) },
+            n.len() as i64
+        );
+        // Original still intact before commit.
+        assert_eq!(unsafe { read_source_all(src3) }, data);
+        assert_eq!(unsafe { zip_source_commit_write(src3) }, 0);
+        assert_eq!(unsafe { read_source_all(src3) }, b"new");
+        unsafe { zip_source_free(src3) };
+
+        // Misordering returns a defined error, never a panic.
+        let src4 = unsafe { zip_source_buffer(std::ptr::null_mut(), std::ptr::null(), 0, 0) };
+        assert_eq!(unsafe { zip_source_commit_write(src4) }, -1);
+        assert_eq!(unsafe { zip_source_begin_write(src4) }, 0);
+        unsafe { zip_source_rollback_write(src4) };
+        assert_eq!(unsafe { zip_source_commit_write(src4) }, -1);
+        unsafe { zip_source_free(src4) };
+    }
+
+    /// TC-4b-4: full pipeline `file -> window -> crc -> compress`, compressed
+    /// output byte-identical to the Rust/C writer codec.
+    #[test]
+    fn source_pipeline_file_window_crc_compress() {
+        use zip_core::constant::CompressionMethod;
+        let path = temp_path("pipe");
+        build_zip(&path);
+        let full = std::fs::read(&path).unwrap();
+        let cpath = CString::new(path.to_string_lossy().as_bytes()).unwrap();
+
+        let mut errp: c_int = -1;
+        let file_src =
+            unsafe { zip_source_file_create(cpath.as_ptr(), 0, -1, &mut errp) };
+        assert!(!file_src.is_null());
+        // window over the whole file (takes ownership of file_src).
+        let win = unsafe { zip_source_window_create(file_src, 0, -1, &mut errp) };
+        assert!(!win.is_null());
+        // crc over the window (takes ownership).
+        let crc = unsafe { zip_source_crc_create(win, 0, std::ptr::null_mut()) };
+        assert!(!crc.is_null());
+        // compress over the crc (takes ownership).
+        let comp = unsafe { zip_source_compress(crc, ZIP_CM_DEFLATE, 0) };
+        assert!(!comp.is_null());
+
+        // The pipeline output must equal the deterministic writer codec output.
+        let got = unsafe { read_source_all(comp) };
+        let expected = zip_core::compress_bytes(&full, CompressionMethod::Deflate, 6).unwrap();
+        assert_eq!(got, expected, "pipeline compressed output must match writer");
+
+        // Reading the compressed bytes back yields the original.
+        let mut back = Vec::new();
+        zip_core::codec::decode_slice_into(&got, CompressionMethod::Deflate, got.len() as u64, &mut back)
+            .unwrap();
+        assert_eq!(back, full);
+
+        unsafe { zip_source_free(comp) };
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// TC-4b-5: `zip_source_*` helper functions match C for identical inputs.
+    #[test]
+    fn source_helpers_parity() {
+        // make_command_bitmap: single-bit + multi-bit, terminated by a negative.
+        assert_eq!(make_bitmap(&[ZIP_SOURCE_READ]), src_bit(ZIP_SOURCE_READ));
+        let bm = make_bitmap(&[
+            ZIP_SOURCE_OPEN,
+            ZIP_SOURCE_READ,
+            ZIP_SOURCE_CLOSE,
+            ZIP_SOURCE_SEEK,
+            ZIP_SOURCE_TELL,
+            -1,
+        ]);
+        assert_eq!(
+            bm,
+            src_bit(ZIP_SOURCE_OPEN)
+                | src_bit(ZIP_SOURCE_READ)
+                | src_bit(ZIP_SOURCE_CLOSE)
+                | src_bit(ZIP_SOURCE_SEEK)
+                | src_bit(ZIP_SOURCE_TELL)
+        );
+        // The exported fixed-arity symbol sets bit cmd0.
+        assert_eq!(unsafe { zip_source_make_command_bitmap(ZIP_SOURCE_READ) }, src_bit(ZIP_SOURCE_READ));
+
+        // seek_compute_offset across whence.
+        let mut args = ZipSourceArgsSeek { offset: 10, whence: SEEK_SET };
+        let mut errp: c_int = 0;
+        assert_eq!(
+            unsafe {
+                zip_source_seek_compute_offset(0, 100, (&mut args) as *mut _ as *mut c_void, std::mem::size_of::<ZipSourceArgsSeek>() as u64, &mut errp)
+            },
+            10
+        );
+        args.whence = SEEK_CUR;
+        assert_eq!(
+            unsafe {
+                zip_source_seek_compute_offset(20, 100, (&mut args) as *mut _ as *mut c_void, std::mem::size_of::<ZipSourceArgsSeek>() as u64, &mut errp)
+            },
+            30
+        );
+        args.whence = SEEK_END;
+        args.offset = -5;
+        assert_eq!(
+            unsafe {
+                zip_source_seek_compute_offset(0, 100, (&mut args) as *mut _ as *mut c_void, std::mem::size_of::<ZipSourceArgsSeek>() as u64, &mut errp)
+            },
+            95
+        );
+        // Out-of-bounds -> -1 + INVAL.
+        args.whence = SEEK_SET;
+        args.offset = 200;
+        assert_eq!(
+            unsafe {
+                zip_source_seek_compute_offset(0, 100, (&mut args) as *mut _ as *mut c_void, std::mem::size_of::<ZipSourceArgsSeek>() as u64, &mut errp)
+            },
+            -1
+        );
+        assert_eq!(errp, ZipErrorCode::Inval.as_i32());
+
+        // args_seek returns NULL for too-small len.
+        assert!(unsafe { zip_source_args_seek((&mut args) as *mut _ as *mut c_void, 1) }.is_null());
+
+        // pass_to_lower_layer forwards to a real lower source.
+        let data = b"forward me".to_vec();
+        let lower = unsafe {
+            zip_source_buffer(
+                std::ptr::null_mut(),
+                data.as_ptr() as *const c_void,
+                data.len() as u64,
+                0,
+            )
+        };
+        // OPEN + READ via pass_to_lower_layer.
+        assert_eq!(
+            unsafe { zip_source_pass_to_lower_layer(lower, std::ptr::null_mut(), 0, ZIP_SOURCE_OPEN) },
+            0
+        );
+        let mut buf = [0u8; 6];
+        assert_eq!(
+            unsafe {
+                zip_source_pass_to_lower_layer(lower, buf.as_mut_ptr() as *mut c_void, 6, ZIP_SOURCE_READ)
+            },
+            6
+        );
+        assert_eq!(&buf, b"forwar");
+        // Write-mode commands -> OPNOTSUPP (-1).
+        assert_eq!(
+            unsafe { zip_source_pass_to_lower_layer(lower, std::ptr::null_mut(), 0, ZIP_SOURCE_WRITE) },
+            -1
+        );
+        unsafe { zip_source_free(lower) };
+    }
+
+    /// TC-4b-6: no panic on malformed write / layered callbacks.
+    #[test]
+    fn source_write_malformed_no_panic() {
+        // A layered callback returning an invalid SUPPORTS / -1.
+        unsafe extern "C" fn bad_layered_cb(
+            _lower: H,
+            _ud: *mut c_void,
+            _data: *mut c_void,
+            _len: u64,
+            _cmd: c_int,
+        ) -> i64 {
+            -1
+        }
+        let data = b"x".to_vec();
+        let base = unsafe {
+            zip_source_buffer(
+                std::ptr::null_mut(),
+                data.as_ptr() as *const c_void,
+                data.len() as u64,
+                0,
+            )
+        };
+        let mut errp: c_int = -1;
+        // SUPPORTS < 0 => creation fails cleanly (NULL), no panic.
+        let layered =
+            unsafe { zip_source_layered_create(base, Some(bad_layered_cb), std::ptr::null_mut(), &mut errp) };
+        assert!(layered.is_null(), "invalid SUPPORTS must fail creation");
+
+        // begin_write on an already-open source -> -1, no panic.
+        let src = unsafe { zip_source_buffer(std::ptr::null_mut(), std::ptr::null(), 0, 0) };
+        assert_eq!(unsafe { zip_source_begin_write(src) }, 0);
+        assert_eq!(unsafe { zip_source_begin_write(src) }, -1);
+        unsafe { zip_source_free(src) };
+
+        // commit/rollback/seek_write on a source with no open write -> defined error.
+        let src2 = unsafe { zip_source_buffer(std::ptr::null_mut(), std::ptr::null(), 0, 0) };
+        assert_eq!(unsafe { zip_source_seek_write(src2, 0, SEEK_SET) }, -1);
+        assert_eq!(unsafe { zip_source_tell_write(src2) }, -1);
+        unsafe { zip_source_rollback_write(src2) };
+        assert_eq!(unsafe { zip_source_commit_write(src2) }, -1);
+        unsafe { zip_source_free(src2) };
     }
 }

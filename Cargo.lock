@@ -1065,6 +1065,7 @@ name = "zip-sys"
 version = "0.1.0"
 dependencies = [
  "crc32fast",
+ "flate2",
  "libc",
  "libloading",
  "zip-core",
