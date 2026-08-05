@@ -47,6 +47,10 @@ pub struct EntryReader {
     expected_crc: u32,
     expected_size: u64,
     size_read: u64,
+    /// Whether the end-of-stream CRC should be verified. WinZip AES AE-2
+    /// entries store CRC 0 (invalid), so the reader skips the CRC check and
+    /// relies on the HMAC (verified earlier) instead.
+    check_crc: bool,
     /// True once EOF has been reached and the integrity check has run.
     finished: bool,
     /// Deferred integrity error to surface on the final read.
@@ -87,6 +91,31 @@ impl EntryReader {
             expected_crc,
             expected_size: uncomp_size,
             size_read: 0,
+            check_crc: true,
+            finished: false,
+            integrity_err: None,
+            seeked: false,
+        })
+    }
+
+    /// Build an `EntryReader` over `src` (positioned at the data start) that
+    /// skips the end-of-stream CRC check. Used for WinZip AES AE-2 entries,
+    /// whose stored CRC is 0/invalid; integrity is instead guaranteed by the
+    /// already-verified HMAC-SHA1 tag.
+    pub fn new_skip_crc(
+        src: Box<dyn Source>,
+        method: CompressionMethod,
+        comp_size: u64,
+        uncomp_size: u64,
+    ) -> Result<EntryReader> {
+        let inner = Decoder::new(src, method, comp_size)?;
+        Ok(EntryReader {
+            inner: Inner::Streaming(inner),
+            crc: crc32fast::Hasher::new(),
+            expected_crc: 0,
+            expected_size: uncomp_size,
+            size_read: 0,
+            check_crc: false,
             finished: false,
             integrity_err: None,
             seeked: false,
@@ -113,6 +142,28 @@ impl EntryReader {
             expected_crc,
             expected_size,
             size_read: 0,
+            check_crc: true,
+            finished: false,
+            integrity_err: None,
+            seeked: false,
+        }
+    }
+
+    /// Build a buffered `EntryReader` (from already-decoded in-memory bytes)
+    /// that skips the end-of-stream CRC check. Used for WinZip AES AE-2
+    /// entries, whose stored CRC is 0/invalid (integrity comes from the HMAC).
+    pub fn from_buffer_skip_crc(
+        data: Vec<u8>,
+        expected_size: u64,
+        pool: Option<Arc<Mutex<BufferPool>>>,
+    ) -> EntryReader {
+        EntryReader {
+            inner: Inner::Buffered { data, pos: 0, pool },
+            crc: crc32fast::Hasher::new(),
+            expected_crc: 0,
+            expected_size,
+            size_read: 0,
+            check_crc: false,
             finished: false,
             integrity_err: None,
             seeked: false,
@@ -168,8 +219,8 @@ impl EntryReader {
         if self.seeked {
             return true;
         }
-        if self.size_read != self.expected_size || self.crc.clone().finalize() != self.expected_crc
-        {
+        let crc_ok = !self.check_crc || self.crc.clone().finalize() == self.expected_crc;
+        if self.size_read != self.expected_size || !crc_ok {
             let err = io::Error::new(io::ErrorKind::InvalidData, "CRC or size mismatch");
             self.integrity_err = Some(err);
             false

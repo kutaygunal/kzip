@@ -12,7 +12,7 @@
 //! parallelism win and, if it monopolized a worker, would hurt the whole pool —
 //! so such files are compressed serially (fall back).
 
-use crate::constant::{flag, magic, CompressionMethod};
+use crate::constant::{flag, magic, CompressionMethod, EF_WINZIP_AES, EF_WINZIP_AES_SIZE, ZIP_CM_WINZIP_AES};
 use crate::error::{Result, ZipError, ZipErrorCode};
 use std::io::Write;
 
@@ -210,13 +210,55 @@ pub fn write_archive_encrypted(
     password: &[u8],
     encrypt: &[bool],
 ) -> Result<Vec<u8>> {
+    let methods: Vec<u16> = encrypt
+        .iter()
+        .map(|&e| {
+            if e {
+                crate::constant::encryption::TRAD_PKWARE
+            } else {
+                0
+            }
+        })
+        .collect();
+    write_archive_encrypted_methods(files, opts, password, &methods)
+}
+
+/// Write a complete ZIP archive, encrypting each entry with the per-entry
+/// encryption `method` (`0` = none, `1` = traditional PKWARE/ZipCrypto, or one
+/// of `ZIP_EM_AES_128/192/256`) using `password`.
+///
+/// AES entries are written as WinZip AES AE-2: on-disk compression method 99,
+/// an `0x9901` extra field carrying the actual method + strength, the
+/// `ENCRYPTED | DATA_DESCRIPTOR` bit flags, a CRC field of 0 (not stored for
+/// AE-2), and a data region of `[salt][2-byte verify][AES-CTR ciphertext]
+/// [10-byte HMAC-SHA1]`.
+pub fn write_archive_encrypted_methods(
+    files: &[ArchiveFile],
+    opts: &CompressOptions,
+    password: &[u8],
+    methods: &[u16],
+) -> Result<Vec<u8>> {
     let mut compressed = compress_files(files, opts)?;
-    for (cf, &enc) in compressed.iter_mut().zip(encrypt) {
-        if enc {
+    if methods.len() != compressed.len() {
+        return Err(ZipError::new(ZipErrorCode::Inval));
+    }
+    for (cf, &em) in compressed.iter_mut().zip(methods) {
+        if em == 0 {
+            continue;
+        }
+        if em == crate::constant::encryption::TRAD_PKWARE {
             let encrypted = crate::crypto::encrypt_data(password, cf.crc, &cf.data);
             cf.data = encrypted;
             cf.comp_size = cf.data.len() as u64;
             cf.encryption_method = crate::constant::encryption::TRAD_PKWARE;
+        } else if crate::crypto::is_aes_method(em) {
+            let salt = crate::crypto::random_salt(crate::crypto::aes_salt_length(em));
+            let encrypted = crate::crypto::aes_encrypt_data(password, em, &cf.data, &salt);
+            cf.data = encrypted;
+            cf.comp_size = cf.data.len() as u64;
+            cf.encryption_method = em;
+        } else {
+            return Err(ZipError::new(ZipErrorCode::Encrmethnotsupp));
         }
     }
     write_compressed(&compressed)
@@ -241,47 +283,100 @@ fn write_compressed(compressed: &[CompressedFile]) -> Result<Vec<u8>> {
 }
 
 fn write_local_header(cf: &CompressedFile, out: &mut Vec<u8>) {
+    let aes = crate::crypto::is_aes_method(cf.encryption_method);
     let flags = if cf.encryption_method != 0 {
-        flag::ENCRYPTED
+        if aes {
+            flag::ENCRYPTED | flag::DATA_DESCRIPTOR
+        } else {
+            flag::ENCRYPTED
+        }
     } else {
         0
     };
+    let method = on_disk_method(cf);
+    let crc = if aes { 0 } else { cf.crc };
+    let version_needed = if aes { 51u16 } else { 20u16 };
+    let extra = aes_extra_field(cf);
+    let extra_len = extra.as_ref().map(|e| e.len()).unwrap_or(0) as u16;
     out.extend_from_slice(&magic::LOCAL);
-    out.extend_from_slice(&20u16.to_le_bytes()); // version needed
+    out.extend_from_slice(&version_needed.to_le_bytes());
     out.extend_from_slice(&flags.to_le_bytes()); // bit flags
-    out.extend_from_slice(&cf.method.to_le_bytes());
+    out.extend_from_slice(&method.to_le_bytes());
     out.extend_from_slice(&0u32.to_le_bytes()); // dos time/date = 0
-    out.extend_from_slice(&cf.crc.to_le_bytes());
+    out.extend_from_slice(&crc.to_le_bytes());
     out.extend_from_slice(&(cf.comp_size as u32).to_le_bytes());
     out.extend_from_slice(&(cf.uncomp_size as u32).to_le_bytes());
     out.extend_from_slice(&(cf.name.len() as u16).to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes()); // extra len
+    out.extend_from_slice(&extra_len.to_le_bytes()); // extra len
     out.extend_from_slice(cf.name.as_bytes());
+    if let Some(e) = &extra {
+        out.extend_from_slice(e);
+    }
 }
 
 fn write_central_entry(cf: &CompressedFile, offset: u64, cdir: &mut Vec<u8>) {
+    let aes = crate::crypto::is_aes_method(cf.encryption_method);
     let flags = if cf.encryption_method != 0 {
-        flag::ENCRYPTED
+        if aes {
+            flag::ENCRYPTED | flag::DATA_DESCRIPTOR
+        } else {
+            flag::ENCRYPTED
+        }
     } else {
         0
     };
+    let method = on_disk_method(cf);
+    let crc = if aes { 0 } else { cf.crc };
+    let version_needed = if aes { 51u16 } else { 20u16 };
+    let extra = aes_extra_field(cf);
+    let extra_len = extra.as_ref().map(|e| e.len()).unwrap_or(0) as u16;
     cdir.extend_from_slice(&magic::CENTRAL);
-    cdir.extend_from_slice(&(3u16 << 8 | 20u16).to_le_bytes()); // version made by: unix, 2.0
-    cdir.extend_from_slice(&20u16.to_le_bytes()); // version needed
+    cdir.extend_from_slice(&(3u16 << 8 | version_needed).to_le_bytes()); // version made by: unix
+    cdir.extend_from_slice(&version_needed.to_le_bytes()); // version needed
     cdir.extend_from_slice(&flags.to_le_bytes()); // bit flags
-    cdir.extend_from_slice(&cf.method.to_le_bytes());
+    cdir.extend_from_slice(&method.to_le_bytes());
     cdir.extend_from_slice(&0u32.to_le_bytes()); // dos time/date
-    cdir.extend_from_slice(&cf.crc.to_le_bytes());
+    cdir.extend_from_slice(&crc.to_le_bytes());
     cdir.extend_from_slice(&(cf.comp_size as u32).to_le_bytes());
     cdir.extend_from_slice(&(cf.uncomp_size as u32).to_le_bytes());
     cdir.extend_from_slice(&(cf.name.len() as u16).to_le_bytes());
-    cdir.extend_from_slice(&0u16.to_le_bytes()); // extra len
+    cdir.extend_from_slice(&extra_len.to_le_bytes()); // extra len
     cdir.extend_from_slice(&0u16.to_le_bytes()); // comment len
     cdir.extend_from_slice(&0u16.to_le_bytes()); // disk number
     cdir.extend_from_slice(&0u16.to_le_bytes()); // internal attrs
     cdir.extend_from_slice(&0u32.to_le_bytes()); // external attrs
     cdir.extend_from_slice(&(offset as u32).to_le_bytes());
     cdir.extend_from_slice(cf.name.as_bytes());
+    if let Some(e) = &extra {
+        cdir.extend_from_slice(e);
+    }
+}
+
+/// The on-disk compression-method field: for WinZip AES entries this is the
+/// special `ZIP_CM_WINZIP_AES` (99); otherwise the real method.
+fn on_disk_method(cf: &CompressedFile) -> u16 {
+    if crate::crypto::is_aes_method(cf.encryption_method) {
+        ZIP_CM_WINZIP_AES
+    } else {
+        cf.method
+    }
+}
+
+/// Build the `0x9901` WinZip AES extra-field block (id + length + data) for an
+/// AES entry, or `None` for a non-AES entry. Data: `u16` version (AE-2 = 2),
+/// "AE" vendor, `u8` strength, `u16` actual compression method.
+fn aes_extra_field(cf: &CompressedFile) -> Option<Vec<u8>> {
+    if !crate::crypto::is_aes_method(cf.encryption_method) {
+        return None;
+    }
+    let mut ef = Vec::with_capacity(4 + EF_WINZIP_AES_SIZE);
+    ef.extend_from_slice(&EF_WINZIP_AES.to_le_bytes());
+    ef.extend_from_slice(&(EF_WINZIP_AES_SIZE as u16).to_le_bytes());
+    ef.extend_from_slice(&2u16.to_le_bytes()); // AE-2
+    ef.extend_from_slice(b"AE");
+    ef.push(crate::crypto::aes_strength(cf.encryption_method));
+    ef.extend_from_slice(&cf.method.to_le_bytes());
+    Some(ef)
 }
 
 fn write_eocd(num_entries: u16, cdir_size: u64, cdir_offset: u64, out: &mut Vec<u8>) {

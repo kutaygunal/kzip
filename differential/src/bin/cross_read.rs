@@ -157,9 +157,12 @@ fn c_writes_rust_reads(corpus: &Path) -> Vec<ArchiveCheck> {
                 continue;
             }
         };
-        // Phase 1: supply the known password for the ZipCrypto-encrypted
-        // corpus archive so entries decrypt.
-        if stem.contains("enc_zipcrypto") {
+        // Phase 1/2: supply the known password for the encrypted corpus
+        // archives (ZipCrypto + WinZip AES) so entries decrypt.
+        if stem.contains("enc_zipcrypto")
+            || stem.contains("aes128_enc")
+            || stem.contains("aes256_enc")
+        {
             arch.set_default_password(KZIP_TEST_PASSWORD.as_bytes());
         }
 
@@ -240,6 +243,24 @@ fn rust_writes_c_reads(api: &CReadApi, corpus: &Path) -> Vec<ArchiveCheck> {
         std::fs::write(enc_dir.join(format!("{i}")), &f.data).unwrap();
     }
     out.push(check_c_reads(api, &enc_path, &files, true));
+
+    // WinZip AES-256 archive (Phase 2 TC-1 part b: Rust writes, C reads).
+    let aes_methods = vec![zip_core::constant::encryption::AES_256; files.len()];
+    let aes_bytes = zip_core::write_archive_encrypted_methods(
+        &files,
+        &opts,
+        KZIP_TEST_PASSWORD.as_bytes(),
+        &aes_methods,
+    )
+    .expect("write_archive_encrypted_methods");
+    let aes_dir = corpus.join("inputs").join("rust_aes256");
+    std::fs::create_dir_all(&aes_dir).unwrap();
+    let aes_path = rust_dir.join("rust_aes256.zip");
+    std::fs::write(&aes_path, &aes_bytes).unwrap();
+    for (i, f) in files.iter().enumerate() {
+        std::fs::write(aes_dir.join(format!("{i}")), &f.data).unwrap();
+    }
+    out.push(check_c_reads(api, &aes_path, &files, true));
 
     out
 }

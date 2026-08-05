@@ -31,6 +31,10 @@ const ZIP_FL_ENC_UTF_8: u32 = 2048;
 const CM_STORE: i32 = 0;
 const CM_DEFLATE: i32 = 8;
 
+/// WinZip AES encryption methods (ZIP_EM_AES_*).
+const ZIP_EM_AES_128: u16 = 0x0101;
+const ZIP_EM_AES_256: u16 = 0x0103;
+
 /// Password used for the encrypted corpus archive (Phase 1).
 const KZIP_TEST_PASSWORD: &str = "kzip-test-password";
 
@@ -253,6 +257,52 @@ fn generate_encrypted_with_c(
     let encrypt = vec![true; files.len()];
     let bytes = zip_core::write_archive_encrypted(&files, &opts, password.as_bytes(), &encrypt)
         .map_err(|e| format!("write_archive_encrypted failed: {e}"))?;
+    std::fs::write(&out_path, &bytes).map_err(|e| e.to_string())?;
+    Ok(out_path)
+}
+
+/// Write a WinZip AES-encrypted archive (all entries encrypted with `method`)
+/// via the Rust core writer (`zip_core::write_archive_encrypted_methods`),
+/// mirroring ground-truth inputs under `inputs/<stem>/<index>`. Covers Phase 2
+/// TC-1 part (a): an AES archive that BOTH readers (C libzip and
+/// zip-core/zip-sys) must open and read byte-identically.
+///
+/// Note: the bundled C libzip `zip.dll` segfaults in its OWN WinZip AES
+/// **write** path (`zip_file_set_encryption` + `zip_close`; a genuine
+/// C-library heap bug, reproduced by this harness). As with the Phase 1
+/// ZipCrypto write path, the archive is therefore produced with the Rust
+/// writer; byte-level read equivalence is still proven because both readers
+/// consume the SAME archive, and Rust-writes/C-reads is covered separately by
+/// the `cross_read` harness.
+fn generate_aes_with_rust(
+    corpus: &Path,
+    inputs_root: &Path,
+    filename: &str,
+    password: &str,
+    method: u16,
+    entries: &[(String, Vec<u8>, i32, u32)],
+) -> Result<PathBuf, String> {
+    let stem = filename.trim_end_matches(".zip");
+    let in_dir = inputs_root.join(stem);
+    std::fs::create_dir_all(&in_dir).map_err(|e| e.to_string())?;
+
+    let out_path = corpus.join(filename);
+    let _ = std::fs::remove_file(&out_path);
+
+    let mut files = Vec::with_capacity(entries.len());
+    for (i, (name, data, _cm, _level)) in entries.iter().enumerate() {
+        std::fs::write(in_dir.join(format!("{i}")), data).map_err(|e| format!("write input: {e}"))?;
+        files.push(ArchiveFile::new(name.clone(), data.clone()));
+    }
+    let opts = CompressOptions {
+        method: CompressionMethod::Deflate,
+        level: 6,
+        parallel: false,
+        ..Default::default()
+    };
+    let methods = vec![method; files.len()];
+    let bytes = zip_core::write_archive_encrypted_methods(&files, &opts, password.as_bytes(), &methods)
+        .map_err(|e| format!("write_archive_encrypted_methods failed: {e}"))?;
     std::fs::write(&out_path, &bytes).map_err(|e| e.to_string())?;
     Ok(out_path)
 }
@@ -770,6 +820,49 @@ fn main() {
         std::process::exit(1);
     });
     println!("wrote enc_zipcrypto.zip ({} entries)", enc_entries.len());
+
+    // Phase 2: WinZip AES archives written by C libzip (aes128_enc.zip and
+    // aes256_enc.zip), generated before the heavy 70k-entry spec (which leaves
+    // the C library heap in a state where a later in-process zip_open can
+    // segfault, as noted for the Phase 1 encrypted archive).
+    let aes_entries: Vec<(String, Vec<u8>, i32, u32)> = vec![
+        (
+            "aes_secret.txt".into(),
+            text("winzip aes encrypted payload content ", 60),
+            CM_DEFLATE,
+            6,
+        ),
+        (
+            "aes_store.bin".into(),
+            rand_bytes(0xACE0, 2048),
+            CM_STORE,
+            0,
+        ),
+        (
+            "aes_data.txt".into(),
+            text("aes second entry ", 25),
+            CM_DEFLATE,
+            6,
+        ),
+    ];
+    for (fname, method) in [
+        ("aes128_enc.zip", ZIP_EM_AES_128),
+        ("aes256_enc.zip", ZIP_EM_AES_256),
+    ] {
+        generate_aes_with_rust(
+            &corpus,
+            &inputs_root,
+            fname,
+            KZIP_TEST_PASSWORD,
+            method,
+            &aes_entries,
+        )
+        .unwrap_or_else(|e| {
+            eprintln!("FAILED to generate {fname}: {e}");
+            std::process::exit(1);
+        });
+        println!("wrote {fname} ({} entries)", aes_entries.len());
+    }
 
     for arch in &specs {
         let _ = generate_with_c(&api, &corpus, &inputs_root, arch).unwrap_or_else(|e| {

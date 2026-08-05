@@ -118,6 +118,36 @@ pub mod encryption {
     pub const NONE: u16 = 0;
     /// Traditional PKWARE encryption.
     pub const TRAD_PKWARE: u16 = 1;
+    /// WinZip AES-128 encryption (`ZIP_EM_AES_128`).
+    pub const AES_128: u16 = 0x0101;
+    /// WinZip AES-192 encryption (`ZIP_EM_AES_192`).
+    pub const AES_192: u16 = 0x0102;
+    /// WinZip AES-256 encryption (`ZIP_EM_AES_256`).
+    pub const AES_256: u16 = 0x0103;
     /// Unknown / not determinable encryption method.
     pub const UNKNOWN: u16 = 0xFFFF;
 }
+
+/// The on-disk compression-method value used for a WinZip AES-encrypted entry
+/// (`ZIP_CM_WINZIP_AES` = 99). The real compression method (store/deflate) is
+/// carried inside the 0x9901 AES extra field.
+pub const ZIP_CM_WINZIP_AES: u16 = 99;
+
+/// Extra field ID for the WinZip AES metadata (`ZIP_EF_WINZIP_AES`).
+/// Its data is 7 bytes: `u16` version (1 = AE-1, 2 = AE-2), the 2-byte vendor
+/// "AE", a `u8` strength (1/2/3 = AES-128/192/256), and the `u16` actual
+/// compression method.
+pub const EF_WINZIP_AES: u16 = 0x9901;
+
+/// Size in bytes of the WinZip AES extra field data.
+pub const EF_WINZIP_AES_SIZE: usize = 7;
+
+/// On-disk HMAC (authentication-code) length for WinZip AES AE-2 entries.
+pub const WINZIP_AES_HMAC_LENGTH: usize = 10;
+
+/// On-disk password-verification-value length (2 bytes).
+pub const WINZIP_AES_PASSWORD_VERIFY_LENGTH: usize = 2;
+
+/// Number of PBKDF2-HMAC-SHA1 iterations libzip uses for WinZip AES key
+/// derivation.
+pub const WINZIP_AES_PBKDF2_ITERATIONS: u32 = 1000;

@@ -4,7 +4,11 @@
 //! and local file headers. Handles the ZIP64 extra field for sizes/offsets that
 //! overflow their 32-bit fields.
 
-use crate::constant::{flag, magic, size, CompressionMethod, EXTRA_FIELD_ZIP64, ZIP64_MAGIC32};
+use crate::constant::{
+    flag, magic, size, CompressionMethod, EXTRA_FIELD_ZIP64, ZIP64_MAGIC32, EF_WINZIP_AES,
+    EF_WINZIP_AES_SIZE, ZIP_CM_WINZIP_AES,
+};
+use crate::crypto::aes_method_from_strength;
 use crate::error::{Result, ZipError, ZipErrorCode};
 use crate::reader;
 use std::io::{Cursor, Read, Seek};
@@ -47,6 +51,10 @@ pub struct Dirent {
     pub offset: u64,
     /// Encryption method (0 = none).
     pub encryption_method: u16,
+    /// Whether the stored CRC is valid/trustworthy. WinZip AES AE-2 entries
+    /// do not store a real CRC (it is 0), so integrity must come from the
+    /// HMAC instead; the reader skips CRC verification when this is false.
+    pub crc_valid: bool,
     /// Raw extra-field records `(id, data)`.
     pub extra_fields: Vec<ExtraField>,
 }
@@ -109,16 +117,37 @@ impl Dirent {
             }
         }
 
-        let comp_method = CompressionMethod::from_u16(comp_method_raw);
-        let encryption_method = if bitflags & flag::ENCRYPTED != 0 {
-            if bitflags & flag::STRONG_ENCRYPTION != 0 {
-                crate::constant::encryption::UNKNOWN // unknown strong encryption
+        let (comp_method, encryption_method, crc_valid) =
+            if comp_method_raw == ZIP_CM_WINZIP_AES {
+                // The on-disk method for a WinZip AES entry is 99; the real
+                // method and strength live in the 0x9901 extra field.
+                match parse_aes_extra(&extra_fields) {
+                    Some((enc, actual, version)) => (
+                        actual,
+                        enc,
+                        // AE-1 stores a real CRC; AE-2 does not.
+                        version == 1,
+                    ),
+                    None => (
+                        // Malformed AES entry: keep 99 as unsupported and mark
+                        // encryption unknown so the reader rejects it safely.
+                        CompressionMethod::Unsupported(ZIP_CM_WINZIP_AES as i32),
+                        crate::constant::encryption::UNKNOWN,
+                        false,
+                    ),
+                }
             } else {
-                crate::constant::encryption::TRAD_PKWARE
-            }
-        } else {
-            crate::constant::encryption::NONE
-        };
+                let encryption_method = if bitflags & flag::ENCRYPTED != 0 {
+                    if bitflags & flag::STRONG_ENCRYPTION != 0 {
+                        crate::constant::encryption::UNKNOWN // unknown strong encryption
+                    } else {
+                        crate::constant::encryption::TRAD_PKWARE
+                    }
+                } else {
+                    crate::constant::encryption::NONE
+                };
+                (CompressionMethod::from_u16(comp_method_raw), encryption_method, true)
+            };
 
         Ok(Dirent {
             version_madeby,
@@ -137,6 +166,7 @@ impl Dirent {
             ext_attrib,
             offset,
             encryption_method,
+            crc_valid,
             extra_fields,
         })
     }
@@ -187,12 +217,24 @@ impl Dirent {
             }
         }
 
-        let comp_method = CompressionMethod::from_u16(comp_method_raw);
-        let encryption_method = if bitflags & flag::ENCRYPTED != 0 {
-            crate::constant::encryption::TRAD_PKWARE
-        } else {
-            crate::constant::encryption::NONE
-        };
+        let (comp_method, encryption_method, crc_valid) =
+            if comp_method_raw == ZIP_CM_WINZIP_AES {
+                match parse_aes_extra(&extra_fields) {
+                    Some((enc, actual, version)) => (actual, enc, version == 1),
+                    None => (
+                        CompressionMethod::Unsupported(ZIP_CM_WINZIP_AES as i32),
+                        crate::constant::encryption::UNKNOWN,
+                        false,
+                    ),
+                }
+            } else {
+                let encryption_method = if bitflags & flag::ENCRYPTED != 0 {
+                    crate::constant::encryption::TRAD_PKWARE
+                } else {
+                    crate::constant::encryption::NONE
+                };
+                (CompressionMethod::from_u16(comp_method_raw), encryption_method, true)
+            };
 
         Ok((
             Dirent {
@@ -212,6 +254,7 @@ impl Dirent {
                 ext_attrib: 0,
                 offset: 0,
                 encryption_method,
+                crc_valid,
                 extra_fields,
             },
             header_total,
@@ -292,6 +335,30 @@ fn zip64_data(fields: &[ExtraField]) -> Option<&[u8]> {
         .iter()
         .find(|(id, _)| *id == EXTRA_FIELD_ZIP64)
         .map(|(_, d)| d.as_slice())
+}
+
+/// Parse the WinZip AES extra field (id 0x9901). Returns
+/// `(encryption_method, actual_comp_method, aes_version)` on success, or `None`
+/// if the field is absent/malformed (caller treats it as unsupported).
+///
+/// Data layout (7 bytes): `u16` version (1 = AE-1, 2 = AE-2), 2-byte vendor
+/// "AE", `u8` strength (1/2/3), `u16` actual compression method.
+fn parse_aes_extra(fields: &[ExtraField]) -> Option<(u16, CompressionMethod, u16)> {
+    let data = &fields.iter().find(|(id, _)| *id == EF_WINZIP_AES)?.1;
+    if data.len() < EF_WINZIP_AES_SIZE {
+        return None;
+    }
+    if data[2] != b'A' || data[3] != b'E' {
+        return None;
+    }
+    let version = u16::from_le_bytes([data[0], data[1]]);
+    let strength = data[4];
+    let method = u16::from_le_bytes([data[5], data[6]]);
+    let enc = aes_method_from_strength(strength);
+    if enc == crate::constant::encryption::UNKNOWN {
+        return None;
+    }
+    Some((enc, CompressionMethod::from_u16(method), version))
 }
 
 #[cfg(test)]

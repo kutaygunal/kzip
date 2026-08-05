@@ -219,13 +219,16 @@ unsafe fn process_archive(api: &ZipApi, path: &Path) -> ArchiveRecord {
         };
     }
 
-    // Phase 1: supply the known password for the ZipCrypto-encrypted corpus so
+    // Phase 1/2: supply the known password for encrypted corpus archives so
     // entries decrypt (otherwise fopen hits the NOPASS path).
     let fname = path
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
-    if fname.contains("enc_zipcrypto") {
+    if fname.contains("enc_zipcrypto")
+        || fname.contains("aes128_enc")
+        || fname.contains("aes256_enc")
+    {
         let pw = CString::new("kzip-test-password").unwrap_or_default();
         unsafe { (api.zip_set_default_password)(zh, pw.as_ptr()) };
     }

@@ -6,7 +6,7 @@
 use crate::bufferpool::BufferPool;
 use crate::cdir::read_central_dir;
 use crate::codec::decode_slice_into;
-use crate::constant::{CompressionMethod, BUFFER_POOL_CAPACITY, ZERO_COPY_MAX_UNCOMP};
+use crate::constant::{CompressionMethod, BUFFER_POOL_CAPACITY, MAX_CD_SIZE, ZERO_COPY_MAX_UNCOMP};
 use crate::crypto::{DecryptingSource, ZipCrypto, ENCRYPTION_HEADER_LEN};
 use crate::dirent::Dirent;
 use crate::error::{Result, ZipError, ZipErrorCode};
@@ -106,6 +106,14 @@ impl Archive {
             .entries
             .get(index as usize)
             .ok_or_else(|| ZipError::new(ZipErrorCode::Inval))?;
+        // The 8 real ZIP_STAT_* bits libzip sets, not all 32 bits. WinZip AES
+        // AE-2 entries have no valid CRC, so the ZIP_STAT_CRC (0x20) bit is
+        // cleared (libzip reports 0xDF for those), exactly like C.
+        let valid: u64 = if d.crc_valid {
+            0xFF
+        } else {
+            0xFF & !0x20u64
+        };
         Ok(Stat {
             index: Some(index),
             name: Some(d.filename.clone()),
@@ -116,7 +124,7 @@ impl Archive {
             comp_method: Some(method_to_u16(d.comp_method)),
             encryption_method: Some(d.encryption_method),
             // The 8 real ZIP_STAT_* bits libzip sets, not all 32 bits.
-            valid: 0xFF,
+            valid,
         })
     }
 
@@ -237,7 +245,11 @@ impl Archive {
         // entry that is encrypted/unsupported, or one above the zero-copy size
         // cap.
         if encrypted {
-            // Only traditional PKWARE (ZipCrypto) is supported in this phase.
+            // WinZip AES: authenticate via HMAC-SHA1, decrypt with AES-CTR.
+            if crate::crypto::is_aes_method(d.encryption_method) {
+                return self.open_aes(&mut dup, d, password);
+            }
+            // Only traditional PKWARE (ZipCrypto) is supported otherwise.
             if d.encryption_method != crate::constant::encryption::TRAD_PKWARE {
                 return Err(ZipError::new(ZipErrorCode::Encrmethnotsupp));
             }
@@ -271,6 +283,42 @@ impl Archive {
         }
 
         EntryReader::new(dup, method, comp_size, uncomp_size, crc)
+    }
+
+    /// Open a WinZip AES-encrypted entry: read the full `[salt][pwd_verify]
+    /// [ciphertext][hmac]` region, authenticate it (HMAC-SHA1), decrypt it
+    /// (AES-CTR), then stream-decompress the resulting bytes. The stored CRC
+    /// is not used (AE-2), so CRC verification is skipped in the reader.
+    fn open_aes(
+        &self,
+        dup: &mut Box<dyn Source>,
+        d: &Dirent,
+        password: Option<&[u8]>,
+    ) -> Result<EntryReader> {
+        // Resolve the password: explicit override, else the default.
+        let pw: Vec<u8> = match password {
+            Some(p) => p.to_vec(),
+            None => {
+                let guard = self.password.lock().unwrap_or_else(|e| e.into_inner());
+                match guard.as_ref() {
+                    Some(p) => p.clone(),
+                    None => return Err(ZipError::new(ZipErrorCode::Nopasswd)),
+                }
+            }
+        };
+
+        // Bound the read so a maliciously huge comp_size cannot trigger an
+        // unbounded allocation (zip-bomb guard).
+        if d.comp_size > MAX_CD_SIZE {
+            return Err(ZipError::new(ZipErrorCode::CentralDirTooLarge));
+        }
+        let mut region = vec![0u8; d.comp_size as usize];
+        reader::read_exact(dup, &mut region)?;
+
+        let plain_compressed = crate::crypto::aes_decrypt_data(&pw, d.encryption_method, &region)?;
+        let pclen = plain_compressed.len() as u64;
+        let src: Box<dyn Source> = Box::new(std::io::Cursor::new(plain_compressed));
+        EntryReader::new_skip_crc(src, d.comp_method, pclen, d.uncomp_size)
     }
 }
 
@@ -383,6 +431,7 @@ fn days_in_month(y: i64, m: i64) -> i64 {
 mod tests {
     use super::*;
     use crate::compress::{write_archive, ArchiveFile, CompressOptions};
+    use crate::constant::flag;
     use crate::constant::magic;
     use std::io::{Cursor, Read};
 
@@ -851,6 +900,215 @@ mod tests {
 
         let arch = Archive::open(Cursor::new(v)).unwrap();
         // Wrong password (garbage header) -> WRONGPASS; no panic.
+        let _ = arch.open_entry_with_password(0, Some(b"pw"));
+    }
+
+    // ---- Phase 2: WinZip AES ----
+
+    /// Build a WinZip AES-encrypted archive (all entries encrypted with
+    /// `method`, e.g. AES-128/192/256) using `password`.
+    fn aes_archive(
+        files: &[(&str, Vec<u8>)],
+        password: &[u8],
+        method: u16,
+    ) -> Vec<u8> {
+        let afiles = files
+            .iter()
+            .map(|(n, d)| ArchiveFile::new(*n, d.clone()))
+            .collect::<Vec<_>>();
+        let opts = CompressOptions::default();
+        let methods = vec![method; afiles.len()];
+        crate::compress::write_archive_encrypted_methods(&afiles, &opts, password, &methods)
+            .unwrap()
+    }
+
+    /// AES-128/192/256 archives round-trip: write with the Rust writer, read
+    /// back with the correct password, matching the original bytes and
+    /// reporting the right encryption method.
+    #[test]
+    fn aes_read_write_roundtrip() {
+        for method in [
+            crate::constant::encryption::AES_128,
+            crate::constant::encryption::AES_192,
+            crate::constant::encryption::AES_256,
+        ] {
+            let content = b"winzip aes roundtrip payload ".repeat(40);
+            let bytes = aes_archive(
+                &[("a.txt", content.clone()), ("b.bin", vec![0xAA; 512])],
+                b"kzip-test-password",
+                method,
+            );
+            let arch = Archive::open(Cursor::new(bytes)).unwrap();
+            let data = arch
+                .read_entry_with_password(0, Some(b"kzip-test-password"))
+                .unwrap();
+            assert_eq!(data, content, "method {method:#06x}");
+        }
+    }
+
+    /// TC-2: corrupted ciphertext -> ZIP_ER_CRC (7).
+    #[test]
+    fn aes_integrity_corruption() {
+        let content = b"this is the aes authenticated payload ".repeat(20);
+        let bytes = aes_archive(
+            &[("secret.txt", content.clone())],
+            b"kzip-test-password",
+            crate::constant::encryption::AES_256,
+        );
+        let mut corrupted = bytes.clone();
+        // The entry's data starts after the local header (30) + name + the
+        // 11-byte AES extra field (id+len+7 bytes). Corrupt a ciphertext byte
+        // (past salt[16] + 2-byte verify), not the header/HMAC.
+        let name_len = "secret.txt".len();
+        let aes_extra_len = 4 + crate::constant::EF_WINZIP_AES_SIZE;
+        let data_start = 30 + name_len + aes_extra_len;
+        let cipher_pos = data_start + 16 + 2; // salt(16) + verify(2) => first ciphertext byte
+        corrupted[cipher_pos] ^= 0xFF;
+
+        let arch = Archive::open(Cursor::new(corrupted)).unwrap();
+        let err = arch
+            .open_entry_with_password(0, Some(b"kzip-test-password"))
+            .unwrap_err();
+        assert_eq!(err.code(), ZipErrorCode::Crc);
+        // The unmodified archive reads fine.
+        let arch_ok = Archive::open(Cursor::new(bytes)).unwrap();
+        let ok = arch_ok
+            .read_entry_with_password(0, Some(b"kzip-test-password"))
+            .unwrap();
+        assert_eq!(ok, content);
+    }
+
+    /// TC-3: wrong password -> ZIP_ER_WRONGPASS (27).
+    #[test]
+    fn aes_wrong_password() {
+        let bytes = aes_archive(
+            &[("secret.txt", b"secret".to_vec())],
+            b"right-pw",
+            crate::constant::encryption::AES_256,
+        );
+        let arch = Archive::open(Cursor::new(bytes)).unwrap();
+        let err = arch
+            .open_entry_with_password(0, Some(b"wrong-pw"))
+            .unwrap_err();
+        assert_eq!(err.code(), ZipErrorCode::Wrongpasswd);
+    }
+
+    /// TC-4: no password -> ZIP_ER_NOPASS (26).
+    #[test]
+    fn aes_no_password() {
+        let bytes = aes_archive(
+            &[("secret.txt", b"secret".to_vec())],
+            b"right-pw",
+            crate::constant::encryption::AES_256,
+        );
+        let arch = Archive::open(Cursor::new(bytes)).unwrap();
+        let err = arch.open_entry(0).unwrap_err();
+        assert_eq!(err.code(), ZipErrorCode::Nopasswd);
+    }
+
+    /// TC-6: zip_stat reports ZIP_EM_AES_128/192/256 (257/258/259); an
+    /// unencrypted entry still reports 0 (no regression).
+    #[test]
+    fn stat_encryption_method_aes() {
+        for (method, expected) in [
+            (crate::constant::encryption::AES_128, 257u16),
+            (crate::constant::encryption::AES_192, 258u16),
+            (crate::constant::encryption::AES_256, 259u16),
+        ] {
+            let bytes = aes_archive(&[("e.txt", b"enc".to_vec())], b"pw", method);
+            let arch = Archive::open(Cursor::new(bytes)).unwrap();
+            assert_eq!(
+                arch.stat(0).unwrap().encryption_method,
+                Some(expected),
+                "method {method:#06x}"
+            );
+        }
+        // Unencrypted still reports 0.
+        let plain = write_archive(
+            &[ArchiveFile::new("p.txt", b"plain".to_vec())],
+            &CompressOptions::default(),
+        )
+        .unwrap();
+        let arch = Archive::open(Cursor::new(plain)).unwrap();
+        assert_eq!(arch.stat(0).unwrap().encryption_method, Some(0));
+    }
+
+    /// TC-7: malformed/truncated AES input must not panic; it yields a defined
+    /// error code.
+    #[test]
+    fn aes_malformed_no_panic() {
+        // Truncated archive (cut in half): opening may fail or succeed, but no
+        // panic, and any open entry attempt returns an error.
+        let bytes = aes_archive(
+            &[("a.txt", b"payload payload payload".to_vec())],
+            b"pw",
+            crate::constant::encryption::AES_256,
+        );
+        let cut = bytes.len() / 2;
+        if let Ok(arch) = Archive::open(Cursor::new(bytes[..cut].to_vec())) {
+            let _ = arch.open_entry_with_password(0, Some(b"pw"));
+        }
+
+        // Truncated AES region: local header claims an encrypted region but the
+        // data is shorter than salt+verify+hmac. Build a minimal entry.
+        let mut v = Vec::new();
+        let name = b"a";
+        v.extend_from_slice(&magic::LOCAL);
+        v.extend_from_slice(&51u16.to_le_bytes());
+        v.extend_from_slice(&(flag::ENCRYPTED | flag::DATA_DESCRIPTOR).to_le_bytes());
+        v.extend_from_slice(&crate::constant::ZIP_CM_WINZIP_AES.to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes()); // crc 0
+        v.extend_from_slice(&12u32.to_le_bytes()); // comp_size (too small)
+        v.extend_from_slice(&5u32.to_le_bytes()); // uncomp_size
+        v.extend_from_slice(&1u16.to_le_bytes());
+        v.extend_from_slice(&(4 + crate::constant::EF_WINZIP_AES_SIZE as u16).to_le_bytes());
+        v.extend_from_slice(name);
+        // AES extra field: version 2, "AE", strength 3, method 0.
+        v.extend_from_slice(&crate::constant::EF_WINZIP_AES.to_le_bytes());
+        v.extend_from_slice(&(crate::constant::EF_WINZIP_AES_SIZE as u16).to_le_bytes());
+        v.extend_from_slice(&2u16.to_le_bytes());
+        v.extend_from_slice(b"AE");
+        v.push(3);
+        v.extend_from_slice(&0u16.to_le_bytes());
+        v.extend_from_slice(&[0u8; 12]); // truncated data (needs 28 bytes)
+        let cdir_offset = v.len() as u64;
+        v.extend_from_slice(&magic::CENTRAL);
+        v.extend_from_slice(&(3u16 << 8 | 51u16).to_le_bytes());
+        v.extend_from_slice(&51u16.to_le_bytes());
+        v.extend_from_slice(&(flag::ENCRYPTED | flag::DATA_DESCRIPTOR).to_le_bytes());
+        v.extend_from_slice(&crate::constant::ZIP_CM_WINZIP_AES.to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.extend_from_slice(&12u32.to_le_bytes());
+        v.extend_from_slice(&5u32.to_le_bytes());
+        v.extend_from_slice(&1u16.to_le_bytes());
+        v.extend_from_slice(&(4 + crate::constant::EF_WINZIP_AES_SIZE as u16).to_le_bytes());
+        v.extend_from_slice(&0u16.to_le_bytes());
+        v.extend_from_slice(&0u16.to_le_bytes());
+        v.extend_from_slice(&0u16.to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.push(b'a');
+        v.extend_from_slice(&crate::constant::EF_WINZIP_AES.to_le_bytes());
+        v.extend_from_slice(&(crate::constant::EF_WINZIP_AES_SIZE as u16).to_le_bytes());
+        v.extend_from_slice(&2u16.to_le_bytes());
+        v.extend_from_slice(b"AE");
+        v.push(3);
+        v.extend_from_slice(&0u16.to_le_bytes());
+        let cdir_size = (v.len() as u64) - cdir_offset;
+        v.extend_from_slice(&magic::EOCD);
+        v.extend_from_slice(&0u16.to_le_bytes());
+        v.extend_from_slice(&0u16.to_le_bytes());
+        v.extend_from_slice(&1u16.to_le_bytes());
+        v.extend_from_slice(&1u16.to_le_bytes());
+        v.extend_from_slice(&(cdir_size as u32).to_le_bytes());
+        v.extend_from_slice(&(cdir_offset as u32).to_le_bytes());
+        v.extend_from_slice(&0u16.to_le_bytes());
+
+        let arch = Archive::open(Cursor::new(v)).unwrap();
+        // Truncated AES region -> TruncatedZip (or another defined code), never
+        // a panic.
         let _ = arch.open_entry_with_password(0, Some(b"pw"));
     }
 }

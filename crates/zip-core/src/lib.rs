@@ -75,8 +75,8 @@ pub use archive::Archive;
 pub use bufferpool::BufferPool;
 pub use codec::decode_slice_into;
 pub use compress::{
-    compress_bytes, compress_files, write_archive, write_archive_encrypted, ArchiveFile,
-    CompressOptions, CompressedFile,
+    compress_bytes, compress_files, write_archive, write_archive_encrypted,
+    write_archive_encrypted_methods, ArchiveFile, CompressOptions, CompressedFile,
 };
 pub use error::{Result, ZipError, ZipErrorCode};
 pub use file::EntryReader;

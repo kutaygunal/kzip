@@ -57,8 +57,8 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Mutex;
 
 use zip_core::{
-    write_archive, write_archive_encrypted, Archive, ArchiveFile, CompressOptions, EntryReader,
-    Stat, ZipErrorCode,
+    write_archive, write_archive_encrypted_methods, Archive, ArchiveFile, CompressOptions,
+    EntryReader, Stat, ZipErrorCode,
 };
 
 // ---------------------------------------------------------------------------
@@ -91,6 +91,9 @@ const ZIP_CM_BZIP2: i32 = 12;
 /// Encryption method values.
 const ZIP_EM_NONE: u16 = 0;
 const ZIP_EM_TRAD_PKWARE: u16 = 1;
+const ZIP_EM_AES_128: u16 = 0x0101;
+const ZIP_EM_AES_192: u16 = 0x0102;
+const ZIP_EM_AES_256: u16 = 0x0103;
 
 /// `zip_error_t` layout, mirroring libzip's `struct zip_error`
 /// (`zip_err`, `sys_err`, `str`).
@@ -476,11 +479,11 @@ pub unsafe extern "C" fn zip_close(zh: H) -> c_int {
 /// stream.
 fn materialize(z: &Zip) -> Result<Vec<u8>, i32> {
     let pending = z.pending.lock().unwrap_or_else(|e| e.into_inner());
-    // Logical index -> (file, encrypted?). Logical indices match those returned
-    // by `zip_file_add` / the original entry indices used by
+    // Logical index -> (file, encryption method). Logical indices match those
+    // returned by `zip_file_add` / the original entry indices used by
     // `zip_file_set_encryption`.
     let mut files: Vec<ArchiveFile> = Vec::new();
-    let mut encrypt: Vec<bool> = Vec::new();
+    let mut methods: Vec<u16> = Vec::new();
     let n = z.archive.len();
     for i in 0..n {
         if pending.deletes.contains(&i) {
@@ -497,22 +500,26 @@ fn materialize(z: &Zip) -> Result<Vec<u8>, i32> {
             None => z.archive.read_entry(i).map_err(|e| e.code().as_i32())?,
         };
         files.push(ArchiveFile::new(name, data));
-        let enc = pending
+        let method = pending
             .encryptions
             .iter()
-            .any(|(idx, m)| *idx == i && *m != 0);
-        encrypt.push(enc);
+            .find(|(idx, _)| *idx == i)
+            .map(|(_, m)| *m)
+            .unwrap_or(0);
+        methods.push(method);
     }
     for (k, add) in pending.adds.iter().enumerate() {
         let logical = n + k as u64;
         files.push(ArchiveFile::new(add.name.clone(), add.data.clone()));
-        let enc = pending
+        let method = pending
             .encryptions
             .iter()
-            .any(|(idx, m)| *idx == logical && *m != 0);
-        encrypt.push(enc);
+            .find(|(idx, _)| *idx == logical)
+            .map(|(_, m)| *m)
+            .unwrap_or(0);
+        methods.push(method);
     }
-    let any_enc = encrypt.iter().any(|&e| e);
+    let any_enc = methods.iter().any(|&m| m != 0);
     if any_enc {
         let pw = z
             .password
@@ -520,7 +527,7 @@ fn materialize(z: &Zip) -> Result<Vec<u8>, i32> {
             .unwrap_or_else(|e| e.into_inner())
             .clone()
             .ok_or(ZipErrorCode::Nopasswd.as_i32())?;
-        write_archive_encrypted(&files, &CompressOptions::default(), &pw, &encrypt)
+        write_archive_encrypted_methods(&files, &CompressOptions::default(), &pw, &methods)
             .map_err(|e| e.code().as_i32())
     } else {
         write_archive(&files, &CompressOptions::default()).map_err(|e| e.code().as_i32())
@@ -677,22 +684,7 @@ pub unsafe extern "C" fn zip_fopen(zh: H, name: *const c_char, _flags: u32) -> H
                         z.set_err(e.code().as_i32(), 0);
                         -1
                     })?;
-                    let stat = z.archive.stat(idx).map_err(|e| {
-                        z.set_err(e.code().as_i32(), 0);
-                        -1
-                    })?;
-                    let buffered = EntryReader::from_buffer(
-                        data,
-                        stat.crc.unwrap_or(0),
-                        stat.size.unwrap_or(0),
-                        None,
-                    );
-                    let f = Box::new(ZipFile {
-                        reader: Mutex::new(buffered),
-                        last_error: AtomicI32::new(0),
-                        err_msg: Mutex::new(CString::new(err_str(0)).unwrap_or_default()),
-                    });
-                    Ok(Box::into_raw(f) as H)
+                    Ok(make_zipfile(z, data, idx))
                 }
                 None => {
                     z.set_err(ZipErrorCode::Noent.as_i32(), 0);
@@ -719,18 +711,7 @@ pub unsafe extern "C" fn zip_fopen_index(zh: H, index: u64, _flags: u32) -> H {
                 z.set_err(e.code().as_i32(), 0);
                 -1
             })?;
-            let stat = z.archive.stat(index).map_err(|e| {
-                z.set_err(e.code().as_i32(), 0);
-                -1
-            })?;
-            let buffered =
-                EntryReader::from_buffer(data, stat.crc.unwrap_or(0), stat.size.unwrap_or(0), None);
-            let f = Box::new(ZipFile {
-                reader: Mutex::new(buffered),
-                last_error: AtomicI32::new(0),
-                err_msg: Mutex::new(CString::new(err_str(0)).unwrap_or_default()),
-            });
-            Ok(Box::into_raw(f) as H)
+            Ok(make_zipfile(z, data, index))
         },
         std::ptr::null_mut(),
     )
@@ -795,14 +776,28 @@ pub unsafe extern "C" fn zip_fclose(fh: H) -> c_int {
 
 /// Build an in-memory `ZipFile` handle from already-decrypted `data`.
 unsafe fn make_zipfile(z: &Zip, data: Vec<u8>, index: u64) -> H {
+    let is_aes = z
+        .archive
+        .dirent(index)
+        .map(|d| {
+            matches!(
+                d.encryption_method,
+                zip_core::constant::encryption::AES_128
+                    | zip_core::constant::encryption::AES_192
+                    | zip_core::constant::encryption::AES_256
+            )
+        })
+        .unwrap_or(false);
     match z.archive.stat(index) {
         Ok(stat) => {
-            let buffered = EntryReader::from_buffer(
-                data,
-                stat.crc.unwrap_or(0),
-                stat.size.unwrap_or(0),
-                None,
-            );
+            let size = stat.size.unwrap_or(0);
+            let buffered = if is_aes {
+                // WinZip AES AE-2 entries store CRC 0 (invalid); skip the CRC
+                // check (integrity was verified by the HMAC).
+                EntryReader::from_buffer_skip_crc(data, size, None)
+            } else {
+                EntryReader::from_buffer(data, stat.crc.unwrap_or(0), size, None)
+            };
             let f = Box::new(ZipFile {
                 reader: Mutex::new(buffered),
                 last_error: AtomicI32::new(0),
@@ -929,9 +924,9 @@ pub unsafe extern "C" fn zip_set_default_password(zh: H, password: *const c_char
 
 /// Set the encryption method for the entry at `index`, applied on `zip_close`.
 ///
-/// `ZIP_EM_NONE` (0) and `ZIP_EM_TRAD_PKWARE` (1, traditional PKWARE) are
-/// supported; any other method returns `ZIP_ER_ENCRNOTSUPP`. Returns 0 on
-/// success, -1 on error.
+/// `ZIP_EM_NONE` (0), `ZIP_EM_TRAD_PKWARE` (1), and the three WinZip AES
+/// methods (`ZIP_EM_AES_128/192/256`) are supported; any other method returns
+/// `ZIP_ER_ENCRNOTSUPP`. Returns 0 on success, -1 on error.
 ///
 /// # Safety
 ///
@@ -951,7 +946,12 @@ pub unsafe extern "C" fn zip_file_set_encryption(zh: H, index: u64, method: u16)
                 z.set_err(ZipErrorCode::Inval.as_i32(), 0);
                 return Err(-1);
             }
-            if method != ZIP_EM_NONE && method != ZIP_EM_TRAD_PKWARE {
+            let supported = method == ZIP_EM_NONE
+                || method == ZIP_EM_TRAD_PKWARE
+                || method == ZIP_EM_AES_128
+                || method == ZIP_EM_AES_192
+                || method == ZIP_EM_AES_256;
+            if !supported {
                 z.set_err(ZipErrorCode::Encrmethnotsupp.as_i32(), 0);
                 return Err(-1);
             }
@@ -1670,11 +1670,16 @@ pub extern "C" fn zip_compression_method_supported(method: i32, compress: c_int)
 }
 
 /// Return 1 if the encryption `method` is supported for encoding
-/// (`encode != 0`) or decoding (`encode == 0`). `ZIP_EM_NONE` and
-/// `ZIP_EM_TRAD_PKWARE` (traditional PKWARE / ZipCrypto) are supported.
+/// (`encode != 0`) or decoding (`encode == 0`). Supported: `ZIP_EM_NONE`,
+/// `ZIP_EM_TRAD_PKWARE` (ZipCrypto), and `ZIP_EM_AES_128/192/256` (WinZip AES).
 #[no_mangle]
 pub extern "C" fn zip_encryption_method_supported(method: u16, _encode: c_int) -> c_int {
-    if method == ZIP_EM_NONE || method == ZIP_EM_TRAD_PKWARE {
+    if method == ZIP_EM_NONE
+        || method == ZIP_EM_TRAD_PKWARE
+        || method == ZIP_EM_AES_128
+        || method == ZIP_EM_AES_192
+        || method == ZIP_EM_AES_256
+    {
         1
     } else {
         0
@@ -2765,7 +2770,7 @@ mod tests {
 
     /// `zip_compression_method_supported` / `zip_encryption_method_supported`.
     #[test]
-    fn ffi_method_supported() {
+    fn encryption_method_supported() {
         assert_eq!(zip_compression_method_supported(ZIP_CM_STORE, 1), 1);
         assert_eq!(zip_compression_method_supported(ZIP_CM_DEFLATE, 1), 1);
         assert_eq!(zip_compression_method_supported(ZIP_CM_DEFAULT, 1), 1);
@@ -2774,6 +2779,10 @@ mod tests {
         assert_eq!(zip_compression_method_supported(99, 1), 0);
         assert_eq!(zip_encryption_method_supported(ZIP_EM_NONE, 1), 1);
         assert_eq!(zip_encryption_method_supported(ZIP_EM_TRAD_PKWARE, 1), 1);
+        // Phase 2: WinZip AES methods are supported.
+        assert_eq!(zip_encryption_method_supported(ZIP_EM_AES_128, 1), 1);
+        assert_eq!(zip_encryption_method_supported(ZIP_EM_AES_192, 1), 1);
+        assert_eq!(zip_encryption_method_supported(ZIP_EM_AES_256, 1), 1);
         assert_eq!(zip_encryption_method_supported(99, 1), 0);
     }
 
@@ -3047,6 +3056,7 @@ mod tests {
             "zip_fopen_index_encrypted",
             "zip_file_set_encryption",
             "zip_set_default_password",
+            "zip_encryption_method_supported",
         ] {
             let found: Result<libloading::Symbol<*mut libc::c_void>, _> =
                 unsafe { lib.get(sym.as_bytes()) };
@@ -3069,6 +3079,193 @@ mod tests {
         let out = unsafe { read_ffi_full(fh) };
         assert_eq!(out, b"top secret ffi content ".repeat(20));
         unsafe { zip_fclose(fh) };
+        unsafe { zip_close(zh) };
+        std::fs::remove_file(&path).ok();
+    }
+
+    // ---- Phase 2: WinZip AES ABI ----
+
+    /// Write a WinZip AES-encrypted archive (all entries encrypted with
+    /// `method`) via the Rust core writer, to `path`.
+    fn build_aes_zip(path: &std::path::Path, password: &[u8], method: u16) {
+        let files = vec![
+            zip_core::ArchiveFile::new("aes.txt", b"winzip aes ffi payload ".repeat(24)),
+            zip_core::ArchiveFile::new("aes.bin", vec![0x7F; 384]),
+        ];
+        let methods = vec![method; files.len()];
+        let bytes = zip_core::write_archive_encrypted_methods(
+            &files,
+            &zip_core::CompressOptions::default(),
+            password,
+            &methods,
+        )
+        .unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    /// TC-3: wrong password -> ZIP_ER_WRONGPASS (27) + exact C string.
+    #[test]
+    fn aes_wrong_password() {
+        let path = temp_path("aes_wrongpw");
+        build_aes_zip(&path, b"kzip-test-password", ZIP_EM_AES_256);
+        let cpath = CString::new(path.to_string_lossy().as_bytes()).unwrap();
+        let zh = unsafe { zip_open(cpath.as_ptr(), 0, std::ptr::null_mut()) };
+        assert!(!zh.is_null());
+        let pw = CString::new("wrong-password").unwrap();
+        let fh = unsafe { zip_fopen_index_encrypted(zh, 0, 0, pw.as_ptr()) };
+        assert!(fh.is_null());
+        assert_eq!(cstr(unsafe { zip_strerror(zh) }), "Wrong password provided");
+        unsafe { zip_close(zh) };
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// TC-4: no password -> ZIP_ER_NOPASS (26) + exact C string.
+    #[test]
+    fn aes_no_password() {
+        let path = temp_path("aes_nopass");
+        build_aes_zip(&path, b"kzip-test-password", ZIP_EM_AES_256);
+        let cpath = CString::new(path.to_string_lossy().as_bytes()).unwrap();
+        let zh = unsafe { zip_open(cpath.as_ptr(), 0, std::ptr::null_mut()) };
+        assert!(!zh.is_null());
+        // No default password set -> NOPASS.
+        let fh = unsafe { zip_fopen_index(zh, 0, 0) };
+        assert!(fh.is_null());
+        assert_eq!(cstr(unsafe { zip_strerror(zh) }), "No password provided");
+        unsafe { zip_close(zh) };
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// TC-6: zip_stat reports ZIP_EM_AES_128/192/256 for AES entries; an
+    /// unencrypted entry still reports 0.
+    #[test]
+    fn stat_encryption_method_aes() {
+        for (method, expected) in [
+            (ZIP_EM_AES_128, 257u16),
+            (ZIP_EM_AES_192, 258u16),
+            (ZIP_EM_AES_256, 259u16),
+        ] {
+            let path = temp_path(&format!("aes_stat_{method}"));
+            build_aes_zip(&path, b"kzip-test-password", method);
+            let cpath = CString::new(path.to_string_lossy().as_bytes()).unwrap();
+            let zh = unsafe { zip_open(cpath.as_ptr(), 0, std::ptr::null_mut()) };
+            assert!(!zh.is_null());
+            let mut sb = zero_stat();
+            assert_eq!(unsafe { zip_stat_index(zh, 0, 0, &mut sb) }, 0);
+            assert_eq!(sb.encryption_method, expected, "method {method:#06x}");
+            // AES AE-2 entries have no valid CRC, so the CRC stat bit is clear.
+            assert_eq!(sb.valid, 0xDF);
+            unsafe { zip_close(zh) };
+            std::fs::remove_file(&path).ok();
+        }
+
+        // Unencrypted entry still reports 0.
+        let path2 = temp_path("aes_stat_plain");
+        build_zip(&path2);
+        let cpath2 = CString::new(path2.to_string_lossy().as_bytes()).unwrap();
+        let zh2 = unsafe { zip_open(cpath2.as_ptr(), 0, std::ptr::null_mut()) };
+        assert!(!zh2.is_null());
+        let mut sb2 = zero_stat();
+        assert_eq!(unsafe { zip_stat_index(zh2, 0, 0, &mut sb2) }, 0);
+        assert_eq!(sb2.encryption_method, ZIP_EM_NONE);
+        unsafe { zip_close(zh2) };
+        std::fs::remove_file(&path2).ok();
+    }
+
+    /// TC-10: full C-ABI round-trip for AES-256 — set default password, add a
+    /// file, set encryption to AES-256, write via zip_close, reopen, stat
+    /// reports AES-256, and zip_fopen_index_encrypted returns the original
+    /// bytes.
+    #[test]
+    fn aes_round_trip_abi() {
+        let path = temp_path("aes_roundtrip");
+        let cpath = CString::new(path.to_string_lossy().as_bytes()).unwrap();
+
+        let zh = unsafe { zip_open(cpath.as_ptr(), ZIP_CREATE, std::ptr::null_mut()) };
+        assert!(!zh.is_null(), "zip_open ZIP_CREATE failed");
+        assert_eq!(
+            unsafe {
+                zip_set_default_password(zh, CString::new("kzip-test-password").unwrap().as_ptr())
+            },
+            0
+        );
+        let data = b"aes round trip encrypted abi payload".to_vec();
+        let src =
+            unsafe { zip_source_buffer(zh, data.as_ptr() as *const c_void, data.len() as u64, 0) };
+        assert!(!src.is_null());
+        let idx = unsafe { zip_file_add(zh, CString::new("aes.txt").unwrap().as_ptr(), src, 0) };
+        assert!(idx >= 0, "zip_file_add failed");
+        unsafe { zip_source_free(src) };
+
+        assert_eq!(unsafe { zip_file_set_encryption(zh, idx as u64, ZIP_EM_AES_256) }, 0);
+        // Unsupported method -> ZIP_ER_ENCRNOTSUPP (24).
+        assert_eq!(unsafe { zip_file_set_encryption(zh, idx as u64, 99) }, -1);
+        assert_eq!(
+            cstr(unsafe { zip_strerror(zh) }),
+            "Encryption method not supported"
+        );
+        assert_eq!(unsafe { zip_file_set_encryption(zh, idx as u64, ZIP_EM_AES_256) }, 0);
+
+        assert_eq!(unsafe { zip_close(zh) }, 0);
+
+        // Reopen: stat reports AES-256.
+        let zh2 = unsafe { zip_open(cpath.as_ptr(), 0, std::ptr::null_mut()) };
+        assert!(!zh2.is_null());
+        let mut sb = zero_stat();
+        assert_eq!(unsafe { zip_stat_index(zh2, idx as u64, 0, &mut sb) }, 0);
+        assert_eq!(sb.encryption_method, ZIP_EM_AES_256);
+
+        // No password -> NOPASS.
+        assert!(unsafe { zip_fopen_index(zh2, idx as u64, 0) }.is_null());
+
+        // Correct password -> original bytes.
+        let pw = CString::new("kzip-test-password").unwrap();
+        let fh = unsafe { zip_fopen_index_encrypted(zh2, idx as u64, 0, pw.as_ptr()) };
+        assert!(!fh.is_null(), "zip_fopen_index_encrypted failed");
+        assert_eq!(unsafe { read_ffi_full(fh) }, data);
+        unsafe { zip_fclose(fh) };
+
+        // Set default password on reopen and fopen normally.
+        assert_eq!(unsafe { zip_set_default_password(zh2, pw.as_ptr()) }, 0);
+        let fh2 = unsafe { zip_fopen_index(zh2, idx as u64, 0) };
+        assert!(!fh2.is_null(), "default password should decrypt on fopen");
+        assert_eq!(unsafe { read_ffi_full(fh2) }, data);
+        unsafe { zip_fclose(fh2) };
+
+        unsafe { zip_close(zh2) };
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// TC-2: corrupted AES ciphertext -> ZIP_ER_CRC (7) via the C ABI.
+    #[test]
+    fn aes_integrity_corruption_abi() {
+        let files = vec![zip_core::ArchiveFile::new(
+            "secret.txt",
+            b"aes integrity check payload ".repeat(30),
+        )];
+        let methods = vec![ZIP_EM_AES_256; 1];
+        let bytes = zip_core::write_archive_encrypted_methods(
+            &files,
+            &zip_core::CompressOptions::default(),
+            b"kzip-test-password",
+            &methods,
+        )
+        .unwrap();
+        // Corrupt a ciphertext byte (not the header/HMAC): local header (30)
+        // + name (10) + AES extra (11) + salt (16, AES-256) + verify (2) =>
+        // first ciphertext byte at offset 69.
+        let cipher_pos = 30 + 10 + 11 + 16 + 2;
+        let mut corrupted = bytes.clone();
+        corrupted[cipher_pos] ^= 0xFF;
+
+        let path = temp_path("aes_corrupt");
+        std::fs::write(&path, &corrupted).unwrap();
+        let cpath = CString::new(path.to_string_lossy().as_bytes()).unwrap();
+        let zh = unsafe { zip_open(cpath.as_ptr(), 0, std::ptr::null_mut()) };
+        assert!(!zh.is_null());
+        let pw = CString::new("kzip-test-password").unwrap();
+        let fh = unsafe { zip_fopen_index_encrypted(zh, 0, 0, pw.as_ptr()) };
+        assert!(fh.is_null(), "corrupted AES ciphertext must fail to open");
+        assert_eq!(cstr(unsafe { zip_strerror(zh) }), "CRC error");
         unsafe { zip_close(zh) };
         std::fs::remove_file(&path).ok();
     }
