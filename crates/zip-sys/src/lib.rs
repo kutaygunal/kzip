@@ -44,9 +44,13 @@
 //! `zip_file_extra_fields_count_by_id`, `zip_file_extra_field_get`,
 //! `zip_file_extra_field_get_by_id`.
 //!
-//! DEFERRED (see `docs/ABI.md`): encryption, the full `zip_source_*` streaming
-//! API, progress/cancel callbacks, comment/extra-field WRITE, `zip_unchange*`,
-//! `zip_fdopen`/`zip_open_from_source`, Win32 sources.
+//! COMPLETE (Phase 8) Win32 sources + source utility helpers:
+//! `zip_source_win32a`, `zip_source_win32a_create`, `zip_source_win32w`,
+//! `zip_source_win32w_create`, `zip_source_win32handle`,
+//! `zip_source_win32handle_create`, `zip_source_buffer_fragment`,
+//! `zip_source_buffer_fragment_create`, `zip_buffer_fragment`.
+//!
+//! DEFERRED (see `docs/ABI.md`): none remaining — Phases 1–8 are complete.
 #![allow(unsafe_code)]
 
 use libc::{c_char, c_int, c_void};
@@ -814,6 +818,19 @@ pub struct zip_file_attributes {
     pub external_file_attributes: u32,
     pub general_purpose_bit_flags: u16,
     pub general_purpose_bit_mask: u16,
+}
+
+/// `zip_buffer_fragment_t` layout, mirroring libzip's `struct zip_buffer_fragment`
+/// (`data`, `length`). A `zip_source_buffer_fragment` / `zip_buffer_fragment`
+/// source is assembled from an ordered array of these discontiguous fragments;
+/// the resulting byte stream is the concatenation of the non-zero-length
+/// fragments in array order (their positions are implicit in the order, exactly
+/// as libzip computes cumulative offsets internally).
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct zip_buffer_fragment {
+    pub data: *mut u8,
+    pub length: u64,
 }
 
 /// The Rust state behind an opaque `zip_t*`.
@@ -2662,6 +2679,140 @@ pub unsafe extern "C" fn zip_source_buffer(
     )
 }
 
+// ---------------------------------------------------------------------------
+// Phase 8: buffer-fragment source (`zip_source_buffer_fragment` family) +
+// `zip_buffer_fragment` alias.
+// ---------------------------------------------------------------------------
+
+/// `zip_source_buffer_fragment_create(fragments, nfragments, freep, errorp)`
+/// — `_create` form of the discontiguous-buffer source.
+///
+/// Accepts an array of [`zip_buffer_fragment`] `{data, length}` fragments and
+/// exposes their ordered concatenation as a source (mirroring libzip's
+/// `zip_source_buffer_fragment_create`). Zero-length fragments are skipped;
+/// a NULL `data` on a non-empty fragment, a NULL `fragments` array with
+/// `nfragments > 0`, or a length overflow yields `ZIP_ER_INVAL` (never a
+/// panic). `freep` is accepted for ABI compatibility but the fragments are
+/// copied into an owned contiguous buffer, so the caller keeps ownership of
+/// its fragment data (matching the whole-buffer strategy used elsewhere in
+/// this port).
+///
+/// # Safety
+///
+/// `fragments` must point to `nfragments` readable [`zip_buffer_fragment`]s
+/// (or be NULL when `nfragments == 0`); `errorp`, if non-null, must point to
+/// writable `int` storage.
+#[no_mangle]
+pub unsafe extern "C" fn zip_source_buffer_fragment_create(
+    fragments: *const zip_buffer_fragment,
+    nfragments: u64,
+    _freep: c_int,
+    errorp: *mut c_int,
+) -> H {
+    let h = catch_unwind(AssertUnwindSafe(|| -> Result<H, i32> {
+        if fragments.is_null() && nfragments > 0 {
+            return Err(ZipErrorCode::Inval.as_i32());
+        }
+        let mut data: Vec<u8> = Vec::new();
+        if nfragments > 0 {
+            let frags =
+                unsafe { std::slice::from_raw_parts(fragments, nfragments as usize) };
+            let mut total: u64 = 0;
+            for frag in frags {
+                if frag.length == 0 {
+                    continue;
+                }
+                if frag.data.is_null() {
+                    return Err(ZipErrorCode::Inval.as_i32());
+                }
+                let new_total = total
+                    .checked_add(frag.length)
+                    .ok_or(ZipErrorCode::Inval.as_i32())?;
+                total = new_total;
+                let src =
+                    unsafe { std::slice::from_raw_parts(frag.data, frag.length as usize) };
+                data.extend_from_slice(src);
+            }
+        }
+        // C libzip's buffer source stat: size/comp_size = total, STORE,
+        // NONE encryption, mtime = now.
+        let mtime = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|d| d.as_secs());
+        let stat = Stat {
+            size: Some(data.len() as u64),
+            comp_size: Some(data.len() as u64),
+            mtime,
+            comp_method: Some(0),
+            encryption_method: Some(0),
+            valid: ZIP_STAT_MTIME
+                | ZIP_STAT_SIZE
+                | ZIP_STAT_COMP_SIZE
+                | ZIP_STAT_COMP_METHOD
+                | ZIP_STAT_ENCRYPTION_METHOD,
+            ..Stat::default()
+        };
+        let src =
+            make_memory_source(data, 0, -1, stat).ok_or(ZipErrorCode::Inval.as_i32())?;
+        Ok(Box::into_raw(Box::new(src)) as H)
+    }))
+    .map_or(std::ptr::null_mut(), |r| r.unwrap_or(std::ptr::null_mut()));
+    if h.is_null() && !errorp.is_null() {
+        unsafe {
+            *errorp = ZipErrorCode::Inval.as_i32();
+        }
+    }
+    h
+}
+
+/// `zip_source_buffer_fragment(zh, fragments, nfragments, freep)` — archive
+/// form of [`zip_source_buffer_fragment_create`]; errors are set on the
+/// archive handle (returns NULL immediately if `zh` is NULL, like libzip).
+///
+/// # Safety
+///
+/// `zh` a valid handle; `fragments`/`nfragments` as in the `_create` form.
+#[no_mangle]
+pub unsafe extern "C" fn zip_source_buffer_fragment(
+    zh: H,
+    fragments: *const zip_buffer_fragment,
+    nfragments: u64,
+    freep: c_int,
+) -> H {
+    if zh.is_null() {
+        return std::ptr::null_mut();
+    }
+    let h =
+        zip_source_buffer_fragment_create(fragments, nfragments, freep, std::ptr::null_mut());
+    if h.is_null() {
+        if let Some(z) = zh.cast::<Zip>().as_ref() {
+            z.set_err(ZipErrorCode::Inval.as_i32(), 0);
+        }
+    }
+    h
+}
+
+/// `zip_buffer_fragment(fragments, nfragments, freep, errorp)` — the
+/// buffer-fragment source constructor referenced by the Phase 8 tests. It is
+/// behaviourally identical to [`zip_source_buffer_fragment_create`] (returns a
+/// source handle from an ordered fragment array, reporting errors through
+/// `errorp`), and is exported alongside the libzip-canonical
+/// `zip_source_buffer_fragment*` names.
+///
+/// # Safety
+///
+/// As [`zip_source_buffer_fragment_create`].
+#[no_mangle]
+pub unsafe extern "C" fn zip_buffer_fragment(
+    fragments: *const zip_buffer_fragment,
+    nfragments: u64,
+    freep: c_int,
+    errorp: *mut c_int,
+) -> H {
+    zip_source_buffer_fragment_create(fragments, nfragments, freep, errorp)
+}
+
 /// Release a source created by [`zip_source_buffer`] (or any `zip_source_*`
 /// constructor), decrementing its reference count and freeing it when it
 /// reaches zero (as `zip_source_keep` may have bumped it).
@@ -2884,6 +3035,345 @@ pub unsafe extern "C" fn zip_source_filep(
         }
     }
     h
+}
+
+// ---------------------------------------------------------------------------
+// Phase 8: Win32 sources (`zip_source_win32a` / `zip_source_win32w` /
+// `zip_source_win32handle` and their `_create` forms).
+// ---------------------------------------------------------------------------
+//
+// These mirror libzip's Windows `HANDLE`-based file sources. Like the other
+// file sources in this port they read the target content into an owned
+// contiguous buffer and expose it as a `Memory` backend, so reads are
+// byte-identical to the stdio `zip_source_file` path and the handle can be
+// shared across threads. They are inherently Windows-specific and are
+// `#[cfg(windows)]`-gated so non-Windows builds of the crate stay valid.
+//
+// C error semantics are preserved: NULL path / invalid-or-`INVALID_HANDLE_VALUE`
+// handle / `length < ZIP_LENGTH_UNCHECKED` all yield `ZIP_ER_INVAL`; a
+// non-existent file yields `ZIP_ER_OPEN`; a read failure yields
+// `ZIP_ER_READ`. None of these paths panic.
+
+/// Length of a NUL-terminated UTF-16 string in `u16` units (excludes NUL).
+///
+/// # Safety
+///
+/// `ptr` must point to a NUL-terminated UTF-16 buffer.
+#[cfg(windows)]
+unsafe fn wide_str_len(ptr: *const u16) -> usize {
+    let mut i = 0usize;
+    loop {
+        if unsafe { *ptr.add(i) } == 0 {
+            return i;
+        }
+        i += 1;
+    }
+}
+
+/// Decode a NUL-terminated wide (`wchar_t*`) path into a [`std::path::PathBuf`],
+/// handling arbitrary Unicode (including emoji) filenames. NULL or undecodable
+/// input yields `ZIP_ER_INVAL`.
+///
+/// # Safety
+///
+/// `ptr` must point to a NUL-terminated UTF-16 buffer (or be NULL).
+#[cfg(windows)]
+unsafe fn win32_path_from_wide(ptr: *const u16) -> Result<std::path::PathBuf, i32> {
+    use std::os::windows::ffi::OsStringExt;
+    if ptr.is_null() {
+        return Err(ZipErrorCode::Inval.as_i32());
+    }
+    let len = unsafe { wide_str_len(ptr) };
+    let wide = unsafe { std::slice::from_raw_parts(ptr, len) };
+    // OsString::from_wide never fails (lossy on unpaired surrogates); the
+    // resulting path is usable even for non-ASCII/emoji filenames.
+    let os = std::ffi::OsString::from_wide(wide);
+    Ok(std::path::PathBuf::from(os))
+}
+
+/// Read a file's content + stat via the stdio path for a path source.
+#[cfg(windows)]
+unsafe fn win32_source_from_path(
+    path: &std::path::Path,
+    start: u64,
+    len: i64,
+) -> Result<H, i32> {
+    let meta = std::fs::metadata(path).map_err(|_| ZipErrorCode::Open.as_i32())?;
+    if !meta.is_file() {
+        return Err(ZipErrorCode::Open.as_i32());
+    }
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs());
+    let data = std::fs::read(path).map_err(|_| ZipErrorCode::Read.as_i32())?;
+    let stat = Stat {
+        size: Some(data.len() as u64),
+        mtime,
+        valid: ZIP_STAT_SIZE | ZIP_STAT_MTIME,
+        ..Stat::default()
+    };
+    let src = make_memory_source(data, start, len, stat).ok_or(ZipErrorCode::Inval.as_i32())?;
+    Ok(Box::into_raw(Box::new(src)) as H)
+}
+
+/// Read a file's content + stat from an open Windows `HANDLE`.
+///
+/// The handle is wrapped in a `std::fs::File` (taking ownership) so its bytes
+/// can be read via the standard `Read` trait, then the `File` is dropped,
+/// closing the handle — matching libzip's semantics that `zip_source_win32handle`
+/// consumes the handle and closes it when the source is released.
+///
+/// # Safety
+///
+/// `h` must be a Windows `HANDLE` value (owned by this source per libzip).
+#[cfg(windows)]
+unsafe fn win32_source_from_handle(
+    h: H,
+    start: u64,
+    len: i64,
+) -> Result<H, i32> {
+    use std::os::windows::io::FromRawHandle;
+    // `INVALID_HANDLE_VALUE` is (HANDLE)-1.
+    if h.is_null() || h as usize == usize::MAX {
+        return Err(ZipErrorCode::Inval.as_i32());
+    }
+    let mut f = unsafe { std::fs::File::from_raw_handle(h) };
+    let meta = f.metadata().ok();
+    let mtime = meta
+        .as_ref()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs());
+    let mut data = Vec::new();
+    std::io::Read::read_to_end(&mut f, &mut data)
+        .map_err(|_| ZipErrorCode::Read.as_i32())?;
+    // `f` drops here -> closes the handle.
+    let stat = Stat {
+        size: Some(data.len() as u64),
+        mtime,
+        valid: ZIP_STAT_SIZE | ZIP_STAT_MTIME,
+        ..Stat::default()
+    };
+    let src = make_memory_source(data, start, len, stat).ok_or(ZipErrorCode::Inval.as_i32())?;
+    Ok(Box::into_raw(Box::new(src)) as H)
+}
+
+/// `zip_source_win32a_create(fname, start, len, errorp)` — ANSI `char*` path
+/// form. Identical content to [`zip_source_file_create`]; error via `errorp`.
+///
+/// # Safety
+///
+/// `fname` a NUL-terminated C string; `errorp` (if non-null) writable `int`.
+#[cfg(windows)]
+#[no_mangle]
+pub unsafe extern "C" fn zip_source_win32a_create(
+    fname: *const c_char,
+    start: u64,
+    len: i64,
+    errorp: *mut c_int,
+) -> H {
+    let r = catch_unwind(AssertUnwindSafe(|| -> Result<H, i32> {
+        if fname.is_null() || len < ZIP_LENGTH_UNCHECKED {
+            return Err(ZipErrorCode::Inval.as_i32());
+        }
+        let path = std::path::PathBuf::from(
+            CStr::from_ptr(fname).to_str().map_err(|_| ZipErrorCode::Inval.as_i32())?,
+        );
+        win32_source_from_path(&path, start, len)
+    }));
+    // On failure, write the canonical libzip `ZIP_ER_*` code to `errorp`
+    // (INVAL for a NULL/undecodable path or bad length, OPEN for a missing/
+    // non-file path, READ for a read error) and return NULL — matching C.
+    match r {
+        Ok(Ok(h)) => h,
+        Ok(Err(code)) => {
+            if !errorp.is_null() {
+                unsafe {
+                    *errorp = code;
+                }
+            }
+            std::ptr::null_mut()
+        }
+        Err(_) => {
+            if !errorp.is_null() {
+                unsafe {
+                    *errorp = ZipErrorCode::Internal.as_i32();
+                }
+            }
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// `zip_source_win32a(zh, fname, start, len)` — archive form of
+/// [`zip_source_win32a_create`]; errors set on the archive handle.
+///
+/// # Safety
+///
+/// `zh` a valid handle; `fname` a NUL-terminated C string.
+#[cfg(windows)]
+#[no_mangle]
+pub unsafe extern "C" fn zip_source_win32a(
+    zh: H,
+    fname: *const c_char,
+    start: u64,
+    len: i64,
+) -> H {
+    if zh.is_null() {
+        return std::ptr::null_mut();
+    }
+    let h = zip_source_win32a_create(fname, start, len, std::ptr::null_mut());
+    if h.is_null() {
+        if let Some(z) = zh.cast::<Zip>().as_ref() {
+            z.set_err(ZipErrorCode::Open.as_i32(), 0);
+        }
+    }
+    h
+}
+
+/// `zip_source_win32w_create(fname, start, len, errorp)` — UTF-16 `wchar_t*`
+/// path form. Handles arbitrary Unicode / emoji filenames.
+///
+/// # Safety
+///
+/// `fname` a NUL-terminated UTF-16 buffer; `errorp` (if non-null) writable `int`.
+#[cfg(windows)]
+#[no_mangle]
+pub unsafe extern "C" fn zip_source_win32w_create(
+    fname: *const u16,
+    start: u64,
+    len: i64,
+    errorp: *mut c_int,
+) -> H {
+    let r = catch_unwind(AssertUnwindSafe(|| -> Result<H, i32> {
+        if len < ZIP_LENGTH_UNCHECKED {
+            return Err(ZipErrorCode::Inval.as_i32());
+        }
+        let path = unsafe { win32_path_from_wide(fname) }?;
+        win32_source_from_path(&path, start, len)
+    }));
+    // On failure, write the canonical libzip `ZIP_ER_*` code to `errorp`
+    // (INVAL for a NULL/undecodable path or bad length, OPEN for a missing/
+    // non-file path, READ for a read error) and return NULL — matching C.
+    match r {
+        Ok(Ok(h)) => h,
+        Ok(Err(code)) => {
+            if !errorp.is_null() {
+                unsafe {
+                    *errorp = code;
+                }
+            }
+            std::ptr::null_mut()
+        }
+        Err(_) => {
+            if !errorp.is_null() {
+                unsafe {
+                    *errorp = ZipErrorCode::Internal.as_i32();
+                }
+            }
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// `zip_source_win32w(zh, fname, start, len)` — archive form of
+/// [`zip_source_win32w_create`]; errors set on the archive handle.
+///
+/// # Safety
+///
+/// `zh` a valid handle; `fname` a NUL-terminated UTF-16 buffer.
+#[cfg(windows)]
+#[no_mangle]
+pub unsafe extern "C" fn zip_source_win32w(
+    zh: H,
+    fname: *const u16,
+    start: u64,
+    len: i64,
+) -> H {
+    if zh.is_null() {
+        return std::ptr::null_mut();
+    }
+    let h = zip_source_win32w_create(fname, start, len, std::ptr::null_mut());
+    if h.is_null() {
+        if let Some(z) = zh.cast::<Zip>().as_ref() {
+            z.set_err(ZipErrorCode::Open.as_i32(), 0);
+        }
+    }
+    h
+}
+
+/// `zip_source_win32handle_create(h, start, len, errorp)` — open Windows
+/// `HANDLE` form. `h` must be a valid open handle (not `INVALID_HANDLE_VALUE`);
+/// it is consumed and closed by this source, as in libzip.
+///
+/// # Safety
+///
+/// `h` a valid open Windows `HANDLE` (owned by this source); `errorp` (if
+/// non-null) writable `int`.
+#[cfg(windows)]
+#[no_mangle]
+pub unsafe extern "C" fn zip_source_win32handle_create(
+    h: H,
+    start: u64,
+    len: i64,
+    errorp: *mut c_int,
+) -> H {
+    let r = catch_unwind(AssertUnwindSafe(|| -> Result<H, i32> {
+        if len < ZIP_LENGTH_UNCHECKED {
+            return Err(ZipErrorCode::Inval.as_i32());
+        }
+        win32_source_from_handle(h, start, len)
+    }));
+    // On failure, write the canonical libzip `ZIP_ER_*` code to `errorp`
+    // (INVAL for a bad length or invalid/INVALID_HANDLE_VALUE handle, READ for
+    // a read failure) and return NULL — matching C.
+    match r {
+        Ok(Ok(src)) => src,
+        Ok(Err(code)) => {
+            if !errorp.is_null() {
+                unsafe {
+                    *errorp = code;
+                }
+            }
+            std::ptr::null_mut()
+        }
+        Err(_) => {
+            if !errorp.is_null() {
+                unsafe {
+                    *errorp = ZipErrorCode::Internal.as_i32();
+                }
+            }
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// `zip_source_win32handle(zh, h, start, len)` — archive form of
+/// [`zip_source_win32handle_create`]; errors set on the archive handle.
+///
+/// # Safety
+///
+/// `zh` a valid handle; `h` a valid open Windows `HANDLE` (owned by this source).
+#[cfg(windows)]
+#[no_mangle]
+pub unsafe extern "C" fn zip_source_win32handle(
+    zh: H,
+    h: H,
+    start: u64,
+    len: i64,
+) -> H {
+    if zh.is_null() {
+        return std::ptr::null_mut();
+    }
+    let src = zip_source_win32handle_create(h, start, len, std::ptr::null_mut());
+    if src.is_null() {
+        if let Some(z) = zh.cast::<Zip>().as_ref() {
+            z.set_err(ZipErrorCode::Inval.as_i32(), 0);
+        }
+    }
+    src
 }
 
 /// Create a `zip_source_t*` over a user-supplied C callback.
@@ -7010,6 +7500,24 @@ mod tests {
             "zip_file_error_get",
             "zip_file_get_error",
             "zip_error_get_sys_type",
+            // Phase 8: buffer-fragment source (portable).
+            "zip_buffer_fragment",
+            "zip_source_buffer_fragment",
+            "zip_source_buffer_fragment_create",
+        ] {
+            let found: Result<libloading::Symbol<*mut libc::c_void>, _> =
+                unsafe { lib.get(sym.as_bytes()) };
+            assert!(found.is_ok(), "symbol {sym} missing from cdylib");
+        }
+        // Phase 8 Win32 sources are Windows-only (this build host is Windows).
+        #[cfg(windows)]
+        for sym in [
+            "zip_source_win32a",
+            "zip_source_win32a_create",
+            "zip_source_win32w",
+            "zip_source_win32w_create",
+            "zip_source_win32handle",
+            "zip_source_win32handle_create",
         ] {
             let found: Result<libloading::Symbol<*mut libc::c_void>, _> =
                 unsafe { lib.get(sym.as_bytes()) };
@@ -7555,6 +8063,324 @@ mod tests {
         }
         unsafe { zip_source_close(src) };
         out
+    }
+
+    // ---------------------------------------------------------------------
+    // Phase 8: Win32 sources + buffer-fragment source (behavioral tests).
+    // ---------------------------------------------------------------------
+
+    /// Open an archive handle from a source via `zip_open_from_source`, read
+    /// every entry, and return `(name, bytes)` — used to prove byte-parity
+    /// against the stdio file source. `#[cfg(windows)]` because it uses the
+    /// win32 path sources above.
+    #[cfg(windows)]
+    unsafe fn phase8_entries_via_source(src: H) -> Vec<(String, Vec<u8>)> {
+        let mut err = zip_error {
+            zip_err: 0,
+            sys_err: 0,
+            str: std::ptr::null_mut(),
+        };
+        let zh = unsafe { zip_open_from_source(src, 0, &mut err) };
+        assert!(!zh.is_null(), "zip_open_from_source failed err={}", err.zip_err);
+        let n = unsafe { zip_get_num_entries(zh, 0) } as u64;
+        let mut out = Vec::with_capacity(n as usize);
+        for i in 0..n {
+            let name = unsafe { cstr(zip_get_name(zh, i, 0)) };
+            let fh = unsafe { zip_fopen_index(zh, i, 0) };
+            assert!(!fh.is_null(), "zip_fopen_index({i}) failed");
+            let data = unsafe { read_ffi_full(fh) };
+            unsafe { zip_fclose(fh) };
+            out.push((name, data));
+        }
+        unsafe { zip_close(zh) };
+        out
+    }
+
+    /// TC-1 — Win32 ANSI/wide/handle sources open + read archives
+    /// byte-identically to the stdio file source (`zip_source_file`), for both
+    /// the `_create` and the archive (`zip_source_win32*`) forms, and the wide
+    /// variant handles a non-ASCII (emoji) filename.
+    #[test]
+    #[cfg(windows)]
+    fn win32_source_parity() {
+        use std::os::windows::io::IntoRawHandle;
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("phase8_parity_{}.zip", std::process::id()));
+        build_zip(&path);
+        let ground_truth = std::fs::read(&path).unwrap();
+        let cpath = CString::new(path.to_string_lossy().as_bytes()).unwrap();
+
+        // Stdio file source = the parity ground truth for whole-buffer bytes
+        // and per-entry reads.
+        let src_std = unsafe { zip_source_file_create(cpath.as_ptr(), 0, -1, std::ptr::null_mut()) };
+        assert!(!src_std.is_null(), "zip_source_file_create");
+        assert_eq!(unsafe { read_source_all(src_std) }, ground_truth);
+        unsafe { zip_source_free(src_std) };
+        let zh_std = unsafe { zip_open(cpath.as_ptr(), 0, std::ptr::null_mut()) };
+        assert!(!zh_std.is_null(), "zip_open stdio");
+        let entries_std = {
+            let n = unsafe { zip_get_num_entries(zh_std, 0) } as u64;
+            let mut out = Vec::new();
+            for i in 0..n {
+                let name = unsafe { cstr(zip_get_name(zh_std, i, 0)) };
+                let fh = unsafe { zip_fopen_index(zh_std, i, 0) };
+                let data = unsafe { read_ffi_full(fh) };
+                unsafe { zip_fclose(fh) };
+                out.push((name, data));
+            }
+            out
+        };
+
+        // ANSI create form.
+        let mut errp: c_int = -1;
+        let src_a = unsafe { zip_source_win32a_create(cpath.as_ptr(), 0, -1, &mut errp) };
+        assert!(!src_a.is_null(), "win32a_create errp={errp}");
+        assert_eq!(unsafe { read_source_all(src_a) }, ground_truth);
+        assert_eq!(unsafe { phase8_entries_via_source(src_a) }, entries_std);
+        unsafe { zip_source_free(src_a) };
+
+        // Wide create form with a non-ASCII (emoji) filename.
+        let wide_path =
+            dir.join(format!("phase8_\u{1F600}_parity_{}.zip", std::process::id()));
+        std::fs::write(&wide_path, &ground_truth).unwrap();
+        use std::os::windows::ffi::OsStrExt;
+        let wide: Vec<u16> = wide_path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut errp2: c_int = -1;
+        let src_w = unsafe { zip_source_win32w_create(wide.as_ptr(), 0, -1, &mut errp2) };
+        assert!(!src_w.is_null(), "win32w_create errp={errp2}");
+        assert_eq!(unsafe { read_source_all(src_w) }, ground_truth);
+        assert_eq!(unsafe { phase8_entries_via_source(src_w) }, entries_std);
+        unsafe { zip_source_free(src_w) };
+
+        // Handle create form (ownership of the HANDLE transfers to the source).
+        let f = std::fs::File::open(&path).unwrap();
+        let handle = unsafe { IntoRawHandle::into_raw_handle(f) };
+        let mut errp3: c_int = -1;
+        let src_h = unsafe { zip_source_win32handle_create(handle, 0, -1, &mut errp3) };
+        assert!(!src_h.is_null(), "win32handle_create errp={errp3}");
+        assert_eq!(unsafe { read_source_all(src_h) }, ground_truth);
+        assert_eq!(unsafe { phase8_entries_via_source(src_h) }, entries_std);
+        unsafe { zip_source_free(src_h) };
+
+        // Non-`_create` archive forms behave identically to their `_create`
+        // counterparts (need a real zip_t*; use zip_open on a temp copy).
+        let zh = unsafe { zip_open(cpath.as_ptr(), 0, std::ptr::null_mut()) };
+        assert!(!zh.is_null(), "zip_open for archive forms");
+        let src_a2 = unsafe { zip_source_win32a(zh, cpath.as_ptr(), 0, -1) };
+        assert!(!src_a2.is_null(), "zip_source_win32a");
+        assert_eq!(unsafe { read_source_all(src_a2) }, ground_truth);
+        unsafe { zip_source_free(src_a2) };
+
+        let src_w2 = unsafe { zip_source_win32w(zh, wide.as_ptr(), 0, -1) };
+        assert!(!src_w2.is_null(), "zip_source_win32w");
+        assert_eq!(unsafe { read_source_all(src_w2) }, ground_truth);
+        unsafe { zip_source_free(src_w2) };
+
+        let f2 = std::fs::File::open(&path).unwrap();
+        let handle2 = unsafe { IntoRawHandle::into_raw_handle(f2) };
+        let src_h2 = unsafe { zip_source_win32handle(zh, handle2, 0, -1) };
+        assert!(!src_h2.is_null(), "zip_source_win32handle");
+        assert_eq!(unsafe { read_source_all(src_h2) }, ground_truth);
+        unsafe { zip_source_free(src_h2) };
+
+        unsafe { zip_close(zh) };
+        unsafe { zip_close(zh_std) };
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(&wide_path).ok();
+    }
+
+    /// TC-2 — `zip_buffer_fragment` accepts an ordered fragment array and
+    /// reads byte-identically to the contiguous equivalent buffer; opening the
+    /// assembled archive yields the same entries.
+    #[test]
+    fn buffer_fragment() {
+        let path = temp_path("frag");
+        build_zip(&path);
+        let data = std::fs::read(&path).unwrap();
+
+        // Split into several discontiguous (non-empty) fragments, in order.
+        let mut frags = Vec::new();
+        let mut off = 0usize;
+        while off < data.len() {
+            let take = (off + 7).min(data.len()) - off;
+            let ptr = unsafe { data.as_ptr().add(off) } as *mut u8;
+            frags.push(zip_buffer_fragment {
+                data: ptr,
+                length: take as u64,
+            });
+            off += take;
+        }
+        assert!(frags.len() >= 2, "test needs discontiguous fragments");
+
+        let mut errp: c_int = -1;
+        let src = unsafe { zip_buffer_fragment(frags.as_ptr(), frags.len() as u64, 0, &mut errp) };
+        assert!(!src.is_null(), "zip_buffer_fragment errp={errp}");
+
+        // Whole source bytes == contiguous buffer bytes.
+        assert_eq!(unsafe { read_source_all(src) }, data);
+
+        // Opening the archive from the fragment source reads every entry
+        // identically to opening the contiguous file.
+        let mut err = zip_error { zip_err: 0, sys_err: 0, str: std::ptr::null_mut() };
+        let zh = unsafe { zip_open_from_source(src, 0, &mut err) };
+        assert!(!zh.is_null(), "open_from fragments err={}", err.zip_err);
+        let cpath = CString::new(path.to_string_lossy().as_bytes()).unwrap();
+        let zh_std = unsafe { zip_open(cpath.as_ptr(), 0, std::ptr::null_mut()) };
+        let entries_std = {
+            let n = unsafe { zip_get_num_entries(zh_std, 0) } as u64;
+            let mut out = Vec::new();
+            for i in 0..n {
+                let name = unsafe { cstr(zip_get_name(zh_std, i, 0)) };
+                let fh = unsafe { zip_fopen_index(zh_std, i, 0) };
+                let d = unsafe { read_ffi_full(fh) };
+                unsafe { zip_fclose(fh) };
+                out.push((name, d));
+            }
+            out
+        };
+        let entries_frag = {
+            let n = unsafe { zip_get_num_entries(zh, 0) } as u64;
+            let mut out = Vec::new();
+            for i in 0..n {
+                let name = unsafe { cstr(zip_get_name(zh, i, 0)) };
+                let fh = unsafe { zip_fopen_index(zh, i, 0) };
+                let d = unsafe { read_ffi_full(fh) };
+                unsafe { zip_fclose(fh) };
+                out.push((name, d));
+            }
+            out
+        };
+        assert_eq!(entries_frag, entries_std);
+        unsafe { zip_close(zh) };
+        unsafe { zip_close(zh_std) };
+        unsafe { zip_source_free(src) };
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// TC-3 — helper return values match C: valid inputs yield a non-NULL
+    /// source; invalid inputs yield NULL + the canonical `ZIP_ER_*` code.
+    #[test]
+    #[cfg(windows)]
+    fn win32_helpers_parity() {
+        let path = temp_path("helpers");
+        build_zip(&path);
+        let cpath = CString::new(path.to_string_lossy().as_bytes()).unwrap();
+        let ground_truth = std::fs::read(&path).unwrap();
+
+        // Valid: all create forms return a working source handle.
+        let mut errp: c_int = -1;
+        let s = unsafe { zip_source_win32a_create(cpath.as_ptr(), 0, -1, &mut errp) };
+        assert!(!s.is_null() && errp == -1, "win32a valid (errp untouched)");
+        assert_eq!(unsafe { read_source_all(s) }, ground_truth);
+        unsafe { zip_source_free(s) };
+
+        // Valid windowed form: start/len exposes exactly that sub-range.
+        let mut errp2: c_int = -1;
+        let s2 = unsafe { zip_source_win32a_create(cpath.as_ptr(), 4, 100, &mut errp2) };
+        assert!(!s2.is_null(), "win32a windowed errp={errp2}");
+        assert_eq!(
+            unsafe { read_source_all(s2) },
+            ground_truth[4..104].to_vec(),
+            "window must expose exactly [start, start+len)"
+        );
+        unsafe { zip_source_free(s2) };
+
+        // Invalid length (< ZIP_LENGTH_UNCHECKED) -> NULL + INVAL (18).
+        let mut errp3: c_int = 0;
+        let s3 = unsafe { zip_source_win32a_create(cpath.as_ptr(), 0, -99, &mut errp3) };
+        assert!(s3.is_null(), "bad length must fail");
+        assert_eq!(errp3, ZipErrorCode::Inval.as_i32());
+
+        // NULL path -> NULL + INVAL (18).
+        let mut errp4: c_int = 0;
+        let s4 = unsafe { zip_source_win32a_create(std::ptr::null(), 0, -1, &mut errp4) };
+        assert!(s4.is_null(), "NULL path must fail");
+        assert_eq!(errp4, ZipErrorCode::Inval.as_i32());
+
+        // Non-existent path -> NULL + OPEN (11).
+        let mut errp5: c_int = 0;
+        let missing = CString::new(format!("Z:\\phase8_no_such_{}.zip", std::process::id())).unwrap();
+        let s5 = unsafe { zip_source_win32a_create(missing.as_ptr(), 0, -1, &mut errp5) };
+        assert!(s5.is_null(), "missing path must fail");
+        assert_eq!(errp5, ZipErrorCode::Open.as_i32());
+
+        // Invalid / INVALID_HANDLE_VALUE handle -> NULL + INVAL (18).
+        let mut errp6: c_int = 0;
+        let s6 = unsafe { zip_source_win32handle_create(usize::MAX as H, 0, -1, &mut errp6) };
+        assert!(s6.is_null(), "INVALID_HANDLE_VALUE must fail");
+        assert_eq!(errp6, ZipErrorCode::Inval.as_i32());
+
+        // Start beyond EOF -> NULL + INVAL (18).
+        let mut errp7: c_int = 0;
+        let s7 = unsafe {
+            zip_source_win32a_create(cpath.as_ptr(), ground_truth.len() as u64 + 1, -1, &mut errp7)
+        };
+        assert!(s7.is_null(), "start beyond EOF must fail");
+        assert_eq!(errp7, ZipErrorCode::Inval.as_i32());
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// TC-4 — no panic on invalid handles / malformed input: every bad input
+    /// yields a defined error, never a panic/abort/unwrap.
+    #[test]
+    #[cfg(windows)]
+    fn win32_malformed_no_panic() {
+        use std::os::windows::io::{FromRawHandle, IntoRawHandle};
+
+        // Invalid / INVALID_HANDLE_VALUE handle.
+        let mut errp: c_int = 0;
+        let s = unsafe { zip_source_win32handle_create(std::ptr::null_mut(), 0, -1, &mut errp) };
+        assert!(s.is_null());
+        let s2 = unsafe { zip_source_win32handle_create(usize::MAX as H, 0, -1, &mut errp) };
+        assert!(s2.is_null());
+
+        // A closed handle (opened then closed) reads fail cleanly -> NULL.
+        let f = std::fs::File::open(temp_path("closed")).unwrap_or_else(|_| {
+            // Create a scratch file so we have a real handle to close.
+            let scratch = temp_path("closed");
+            std::fs::write(&scratch, b"x").unwrap();
+            std::fs::File::open(&scratch).unwrap()
+        });
+        let closed = unsafe { IntoRawHandle::into_raw_handle(f) };
+        // Wrap in a File and drop to close the OS handle.
+        drop(unsafe { std::fs::File::from_raw_handle(closed) });
+        let mut errp2: c_int = 0;
+        let s3 = unsafe { zip_source_win32handle_create(closed, 0, -1, &mut errp2) };
+        assert!(s3.is_null(), "closed handle must fail, errp={errp2}");
+
+        // NULL ANSI path.
+        let mut errp3: c_int = 0;
+        let s4 = unsafe { zip_source_win32a_create(std::ptr::null(), 0, -1, &mut errp3) };
+        assert!(s4.is_null());
+
+        // Non-existent ANSI path.
+        let missing = CString::new(format!("Z:\\nope_{}.zip", std::process::id())).unwrap();
+        let mut errp4: c_int = 0;
+        let s5 = unsafe { zip_source_win32a_create(missing.as_ptr(), 0, -1, &mut errp4) };
+        assert!(s5.is_null());
+
+        // NULL wide path.
+        let mut errp5: c_int = 0;
+        let s6 = unsafe { zip_source_win32w_create(std::ptr::null(), 0, -1, &mut errp5) };
+        assert!(s6.is_null());
+
+        // NULL fragment data with non-empty length -> error, not panic.
+        let mut bad = zip_buffer_fragment { data: std::ptr::null_mut(), length: 16 };
+        let mut errp6: c_int = 0;
+        let s7 = unsafe { zip_buffer_fragment(&mut bad, 1, 0, &mut errp6) };
+        assert!(s7.is_null(), "NULL fragment data must fail");
+
+        // NULL fragment array with nfragments > 0 -> error, not panic.
+        let mut errp7: c_int = 0;
+        let s8 = unsafe { zip_buffer_fragment(std::ptr::null(), 2, 0, &mut errp7) };
+        assert!(s8.is_null(), "NULL frags with n>0 must fail");
+
+        std::fs::remove_file(temp_path("closed")).ok();
     }
 
     /// TC-4a-1: `zip_source_file_create` opens + reads a real archive
