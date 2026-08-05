@@ -67,6 +67,9 @@ unsafe impl GlobalAlloc for CountingAlloc {
 static ALLOC: CountingAlloc = CountingAlloc;
 
 // ---- Windows RSS helpers (C side) ----
+// These are Windows-only APIs; on other platforms we fall back to 0 so the
+// bench still compiles and runs (the C RSS delta is reported as 0 there).
+#[cfg(target_os = "windows")]
 #[repr(C)]
 struct ProcessMemoryCounters {
     cb: u32,
@@ -80,15 +83,18 @@ struct ProcessMemoryCounters {
     pagefile_usage: usize,
     peak_pagefile_usage: usize,
 }
+#[cfg(target_os = "windows")]
 #[link(name = "psapi")]
 unsafe extern "system" {
     fn GetProcessMemoryInfo(h: *mut c_void, counters: *mut ProcessMemoryCounters, cb: u32) -> i32;
 }
+#[cfg(target_os = "windows")]
 #[link(name = "kernel32")]
 unsafe extern "system" {
     fn GetCurrentProcess() -> *mut c_void;
 }
 
+#[cfg(target_os = "windows")]
 fn current_working_set() -> usize {
     unsafe {
         let mut pmc = ProcessMemoryCounters {
@@ -107,6 +113,11 @@ fn current_working_set() -> usize {
         GetProcessMemoryInfo(h, &mut pmc, pmc.cb);
         pmc.working_set
     }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn current_working_set() -> usize {
+    0
 }
 
 fn main() {
