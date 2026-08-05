@@ -51,6 +51,9 @@ pub struct EntryReader {
     finished: bool,
     /// Deferred integrity error to surface on the final read.
     integrity_err: Option<io::Error>,
+    /// True once the reader has been seeked; disables the end-of-stream
+    /// CRC/size check (a seeked reader may no longer span the full entry).
+    seeked: bool,
 }
 
 impl std::fmt::Debug for EntryReader {
@@ -87,6 +90,7 @@ impl EntryReader {
             size_read: 0,
             finished: false,
             integrity_err: None,
+            seeked: false,
         })
     }
 
@@ -95,8 +99,10 @@ impl EntryReader {
     ///
     /// `data` holds the entry's decompressed bytes; it is typically a buffer
     /// acquired from the archive's [`BufferPool`] (via `pool`), which will be
-    /// returned to that pool when the reader is dropped.
-    pub(crate) fn from_buffer(
+    /// returned to that pool when the reader is dropped. Passing `None` for
+    /// `pool` makes the reader own the buffer outright (used by the FFI layer
+    /// to serve entries as seekable in-memory buffers).
+    pub fn from_buffer(
         data: Vec<u8>,
         expected_crc: u32,
         expected_size: u64,
@@ -110,6 +116,7 @@ impl EntryReader {
             size_read: 0,
             finished: false,
             integrity_err: None,
+            seeked: false,
         }
     }
 
@@ -123,6 +130,34 @@ impl EntryReader {
         self.size_read
     }
 
+    /// Whether this reader supports seeking (true for buffered readers).
+    pub fn is_seekable(&self) -> bool {
+        matches!(self.inner, Inner::Buffered { .. })
+    }
+
+    /// Seek to an absolute position within the decompressed entry data.
+    ///
+    /// Only supported for buffered (in-memory) readers, which is how the FFI
+    /// layer serves entries. Seeking disables the end-of-stream CRC/size
+    /// verification (a seeked reader may no longer span the full entry).
+    pub fn seek(&mut self, pos: u64) -> io::Result<()> {
+        match &mut self.inner {
+            Inner::Buffered { data, pos: p, .. } => {
+                *p = (pos as usize).min(data.len());
+                self.size_read = *p as u64;
+                self.crc = crc32fast::Hasher::new();
+                self.finished = false;
+                self.integrity_err = None;
+                self.seeked = true;
+                Ok(())
+            }
+            Inner::Streaming(_) => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "seek not supported on streaming reader",
+            )),
+        }
+    }
+
     /// Whether the reader has consumed the full entry (integrity verified or errored).
     pub fn finished(&self) -> bool {
         self.finished
@@ -131,6 +166,9 @@ impl EntryReader {
     /// Check integrity at EOF. Returns `true` on success.
     fn verify(&mut self) -> bool {
         self.finished = true;
+        if self.seeked {
+            return true;
+        }
         if self.size_read != self.expected_size || self.crc.clone().finalize() != self.expected_crc
         {
             let err = io::Error::new(io::ErrorKind::InvalidData, "CRC or size mismatch");
@@ -271,5 +309,26 @@ mod tests {
         let src: Box<dyn Source> = Box::new(Cursor::new(vec![0u8; 4]));
         let e = EntryReader::new(src, CompressionMethod::Store, 0, 0, 0, true).unwrap_err();
         assert_eq!(e.code(), ZipErrorCode::Encrmethnotsupp);
+    }
+
+    /// A buffered reader supports seeking; a seeked reader skips the
+    /// end-of-stream integrity check (it may no longer span the full entry).
+    #[test]
+    fn buffered_reader_seek() {
+        let data = b"0123456789abcdef".to_vec();
+        let mut r = EntryReader::from_buffer(data.clone(), crc(&data), data.len() as u64, None);
+        assert!(r.is_seekable());
+        let mut buf = [0u8; 4];
+        r.read_exact(&mut buf).unwrap();
+        assert_eq!(&buf, b"0123");
+        r.seek(8).unwrap();
+        assert_eq!(r.position(), 8);
+        r.read_exact(&mut buf).unwrap();
+        assert_eq!(&buf, b"89ab");
+        // Seeked reader reads to EOF without a spurious CRC error.
+        r.seek(0).unwrap();
+        let mut out = Vec::new();
+        r.read_to_end(&mut out).unwrap();
+        assert_eq!(out, data);
     }
 }

@@ -11,7 +11,7 @@ use crate::dirent::Dirent;
 use crate::error::{Result, ZipError, ZipErrorCode};
 use crate::file::EntryReader;
 use crate::source::{Source, Stat};
-use std::io::SeekFrom;
+use std::io::{Read, SeekFrom};
 use std::sync::{Arc, Mutex};
 
 /// A ZIP archive opened for reading.
@@ -128,6 +128,19 @@ impl Archive {
             .name_locate(name)
             .ok_or_else(|| ZipError::new(ZipErrorCode::Noent))?;
         self.open_entry(idx)
+    }
+
+    /// Read the full decompressed content of the entry at `index` into a
+    /// `Vec`.
+    ///
+    /// This verifies the entry's CRC and size (via the streaming reader) and
+    /// returns the verified bytes. The FFI layer uses it to serve entries as
+    /// seekable in-memory buffers (so `zip_fseek`/`zip_ftell` work uniformly).
+    pub fn read_entry(&self, index: u64) -> Result<Vec<u8>> {
+        let mut r = self.open_entry(index)?;
+        let mut out = Vec::new();
+        r.read_to_end(&mut out)?;
+        Ok(out)
     }
 
     fn open_dirent(&self, d: &Dirent) -> Result<EntryReader> {
@@ -362,6 +375,22 @@ mod tests {
             arch.open_by_name("nope.txt").unwrap_err().code(),
             ZipErrorCode::Noent
         );
+    }
+
+    /// `read_entry` returns the full, verified decompressed content of an
+    /// entry (used by the FFI layer to serve seekable in-memory buffers).
+    #[test]
+    fn read_entry_returns_verified_bytes() {
+        let files = vec![ArchiveFile::new(
+            "a.txt",
+            b"read_entry test content".to_vec(),
+        )];
+        let bytes = write_archive(&files, &CompressOptions::default()).unwrap();
+        let arch = Archive::open(Cursor::new(bytes)).unwrap();
+        let data = arch.read_entry(0).unwrap();
+        assert_eq!(data, b"read_entry test content");
+        // Out-of-range index errors.
+        assert_eq!(arch.read_entry(5).unwrap_err().code(), ZipErrorCode::Inval);
     }
 
     /// A `Source` that deliberately hides its contiguous buffer (returns `None`

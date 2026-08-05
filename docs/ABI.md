@@ -27,16 +27,72 @@ Legend:
 | `zip_strerror`        | COMPLETE  | |
 | `zip_file_strerror`   | COMPLETE  | |
 | `zip_libzip_version`  | COMPLETE  | returns `"1.11.4"` to match C baseline |
+| `zip_name_locate`     | COMPLETE  | index of first entry named `name`, or -1 |
 
-## Write / edit path — DEFERRED
+## Write / edit path — COMPLETE (buffer-source subset)
 
 | Symbol | Status | Notes |
 |--------|--------|-------|
-| `zip_add`, `zip_add_dir`, `zip_delete`, `zip_rename`, `zip_replace` | DEFERRED | needs the write engine (zip-core Phase 2) |
-| `zip_close` write-through, `zip_discard` | DEFERRED | |
-| `zip_source_buffer`, `zip_source_file`, `zip_source_filep` | DEFERRED | source-construction API |
-| `zip_set_default_password`, `zip_file_add` | DEFERRED | |
-| `zip_error_*`, `zip_register_progress_callback`, `zip_register_cancel_callback` | DEFERRED | |
+| `zip_file_add` | COMPLETE | add entry from a buffer source; `ZIP_FL_OVERWRITE` replaces |
+| `zip_dir_add` | COMPLETE | add a directory entry |
+| `zip_delete` | COMPLETE | mark entry for deletion (applied on close) |
+| `zip_rename` | COMPLETE | rename entry (applied on close) |
+| `zip_file_replace` | COMPLETE | replace entry data (applied on close) |
+| `zip_discard` | COMPLETE | free without writing |
+| `zip_close` write-through | COMPLETE | materializes pending ops + writes on close |
+| `zip_source_buffer` | COMPLETE | minimal buffer source (copies data) |
+| `zip_source_free` | COMPLETE | release a buffer source |
+| `zip_open` `ZIP_CREATE`/`ZIP_TRUNCATE`/`ZIP_RDONLY` | COMPLETE | create/truncate/read-only semantics |
+
+> **Scope note:** the write path is driven by a minimal **buffer** source
+> (`zip_source_buffer`). The full `zip_source_*` streaming API (file/function/
+> layered/window/user-defined, 38 symbols) remains DEFERRED. `zip_add`/
+> `zip_add_dir`/`zip_replace` (deprecated aliases) are not exported.
+
+## Structured error object API — COMPLETE
+
+| Symbol | Status | Notes |
+|--------|--------|-------|
+| `zip_get_error` | COMPLETE | pointer to the archive's `zip_error_t` |
+| `zip_error_init` | COMPLETE | |
+| `zip_error_init_with_code` | COMPLETE | |
+| `zip_error_clear` | COMPLETE | |
+| `zip_error_set` | COMPLETE | |
+| `zip_error_strerror` | COMPLETE | |
+| `zip_error_code_zip` | COMPLETE | |
+| `zip_error_code_system` | COMPLETE | |
+| `zip_error_fini` | COMPLETE | |
+| `zip_error_to_str` | COMPLETE | deprecated helper |
+| `zip_error_system_type` | COMPLETE | `ZIP_ET_NONE`/`ZIP_ET_SYS` |
+| `zip_error_get` | COMPLETE | deprecated helper |
+| `zip_error_set_from_source` | COMPLETE | resets to OK (sources carry no error) |
+
+## fseek / ftell / seekability — COMPLETE
+
+| Symbol | Status | Notes |
+|--------|--------|-------|
+| `zip_fseek` | COMPLETE | SEEK_SET/CUR/END on buffered entries |
+| `zip_ftell` | COMPLETE | |
+| `zip_file_is_seekable` | COMPLETE | always 1 (FFI serves entries as buffers) |
+
+## Method-support queries — COMPLETE
+
+| Symbol | Status | Notes |
+|--------|--------|-------|
+| `zip_compression_method_supported` | COMPLETE | Store/Deflate both ways; Bzip2 decompress-only |
+| `zip_encryption_method_supported` | COMPLETE | only `ZIP_EM_NONE` |
+
+## Comments & extra fields — READ COMPLETE, WRITE DEFERRED
+
+| Symbol | Status | Notes |
+|--------|--------|-------|
+| `zip_get_archive_comment` | COMPLETE | read |
+| `zip_file_get_comment` | COMPLETE | read |
+| `zip_file_extra_fields_count` | COMPLETE | read |
+| `zip_file_extra_fields_count_by_id` | COMPLETE | read |
+| `zip_file_extra_field_get` | COMPLETE | read |
+| `zip_file_extra_field_get_by_id` | COMPLETE | read |
+| `zip_set_archive_comment`, `zip_file_set_comment`, `zip_file_extra_field_set`/`delete` | DEFERRED | write side needs writer comment/extra-field support |
 
 ## Encryption — DEFERRED
 
@@ -44,6 +100,17 @@ Legend:
 `zip_file_set_encryption` are deferred (zip-core encryption lands in a later
 phase; the read path currently rejects encrypted entries with
 `ZIP_ER_ENCRNOTSUPP`).
+
+## Deferred (dedicated phases)
+
+- **Full `zip_source_*` streaming source API** (38 symbols: buffer/file/function/
+  layered/window/user-defined) — only the minimal buffer source is exported.
+- **Encryption** (ZipCrypto + WinZip AES, read & write).
+- **Progress/cancel callbacks**, Win32 sources, `zip_fdopen`/`zip_open_from_source`,
+  `zip_unchange*`, `zip_register_progress_callback*`,
+  `zip_register_cancel_callback_with_state`.
+- Deprecated aliases (`zip_add`, `zip_add_dir`, `zip_replace`, `zip_rename`
+  is the modern name and IS exported).
 
 ## Thread safety
 

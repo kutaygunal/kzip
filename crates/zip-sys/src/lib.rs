@@ -15,17 +15,38 @@
 //! by C callers that follow the libzip ownership rules. All exported functions
 //! are documented with the pointer contract they expect.
 //!
-//! # Implemented subset (Phase 4)
+//! # Implemented subset
 //!
 //! COMPLETE read-path symbols:
 //! - `zip_open`, `zip_close`, `zip_get_num_entries`, `zip_get_name`
 //! - `zip_fopen`, `zip_fopen_index`, `zip_fread`, `zip_fclose`
-//! - `zip_strerror`, `zip_file_strerror`
+//! - `zip_strerror`, `zip_file_strerror`, `zip_name_locate`
 //! - `zip_stat`, `zip_stat_index`, `zip_stat_init`
 //! - `zip_libzip_version`
 //!
-//! STUBBED / DEFERRED (see `docs/ABI.md` for the full 139-symbol tracking): the
-//! write/edit path, encryption, progress/cancel, and source-construction APIs.
+//! COMPLETE write/edit path (buffer-source subset):
+//! - `zip_file_add`, `zip_dir_add`, `zip_delete`, `zip_rename`,
+//!   `zip_file_replace`, `zip_discard`, `zip_source_buffer`, `zip_source_free`
+//! - `zip_close` write-through semantics; `zip_open` `ZIP_CREATE`/`ZIP_TRUNCATE`/`ZIP_RDONLY`
+//!
+//! COMPLETE structured error object API: `zip_get_error`, `zip_error_init`,
+//! `zip_error_init_with_code`, `zip_error_clear`, `zip_error_set`,
+//! `zip_error_strerror`, `zip_error_code_zip`, `zip_error_code_system`,
+//! `zip_error_fini`, `zip_error_to_str`, `zip_error_system_type`,
+//! `zip_error_get`, `zip_error_set_from_source`.
+//!
+//! COMPLETE fseek/ftell/seekability: `zip_fseek`, `zip_ftell`,
+//! `zip_file_is_seekable`. COMPLETE method queries:
+//! `zip_compression_method_supported`, `zip_encryption_method_supported`.
+//!
+//! COMPLETE comment/extra-field READ: `zip_get_archive_comment`,
+//! `zip_file_get_comment`, `zip_file_extra_fields_count`,
+//! `zip_file_extra_fields_count_by_id`, `zip_file_extra_field_get`,
+//! `zip_file_extra_field_get_by_id`.
+//!
+//! DEFERRED (see `docs/ABI.md`): encryption, the full `zip_source_*` streaming
+//! API, progress/cancel callbacks, comment/extra-field WRITE, `zip_unchange*`,
+//! `zip_fdopen`/`zip_open_from_source`, Win32 sources.
 #![allow(unsafe_code)]
 
 use libc::{c_char, c_int, c_void};
@@ -35,7 +56,97 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Mutex;
 
-use zip_core::{Archive, EntryReader, Stat, ZipErrorCode};
+use zip_core::{
+    write_archive, Archive, ArchiveFile, CompressOptions, EntryReader, Stat, ZipErrorCode,
+};
+
+// ---------------------------------------------------------------------------
+// libzip constants (from libzip/lib/zip.h) needed by the exported ABI.
+// ---------------------------------------------------------------------------
+
+/// `zip_open` flags.
+const ZIP_CREATE: c_int = 1;
+const ZIP_TRUNCATE: c_int = 8;
+const ZIP_RDONLY: c_int = 16;
+
+/// `zip_file_add` flag: overwrite an existing entry with the same name.
+const ZIP_FL_OVERWRITE: u32 = 8192;
+
+/// `zip_error_system_type` return values.
+const ZIP_ET_NONE: c_int = 0;
+const ZIP_ET_SYS: c_int = 1;
+
+/// `zip_fseek` whence values (POSIX).
+const SEEK_SET: c_int = 0;
+const SEEK_CUR: c_int = 1;
+const SEEK_END: c_int = 2;
+
+/// Compression method values.
+const ZIP_CM_DEFAULT: i32 = -1;
+const ZIP_CM_STORE: i32 = 0;
+const ZIP_CM_DEFLATE: i32 = 8;
+const ZIP_CM_BZIP2: i32 = 12;
+
+/// Encryption method values.
+const ZIP_EM_NONE: u16 = 0;
+
+/// `zip_error_t` layout, mirroring libzip's `struct zip_error`
+/// (`zip_err`, `sys_err`, `str`).
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct zip_error {
+    pub zip_err: c_int,
+    pub sys_err: c_int,
+    pub str: *mut c_char,
+}
+
+/// The archive's error object plus ownership of its `str` buffer.
+///
+/// All access is serialized by the enclosing `Mutex`, so the raw `str` pointer
+/// is never touched outside the lock; the manual `Send`/`Sync` impls are
+/// therefore sound.
+struct ZipErrorState {
+    ze: zip_error,
+    owned: Option<CString>,
+}
+unsafe impl Send for ZipErrorState {}
+unsafe impl Sync for ZipErrorState {}
+
+/// A pending write operation on an archive, materialized on `zip_close`.
+#[derive(Default)]
+struct PendingOps {
+    /// Entries to append (name + data).
+    adds: Vec<PendingAdd>,
+    /// Original entry indices to delete.
+    deletes: Vec<u64>,
+    /// Original entry index -> new name.
+    renames: Vec<(u64, String)>,
+    /// Original entry index -> replacement data.
+    replaces: Vec<(u64, Vec<u8>)>,
+}
+
+struct PendingAdd {
+    name: String,
+    data: Vec<u8>,
+}
+
+impl PendingOps {
+    fn is_empty(&self) -> bool {
+        self.adds.is_empty()
+            && self.deletes.is_empty()
+            && self.renames.is_empty()
+            && self.replaces.is_empty()
+    }
+}
+
+/// The Rust state behind an opaque `zip_source_t*` (a buffer source).
+///
+/// This is the minimal source model needed to drive the write/edit path
+/// (`zip_file_add`/`zip_file_replace`). The full `zip_source_*` streaming API
+/// (file/function/layered/window/user-defined) remains deferred.
+struct ZipSource {
+    data: Vec<u8>,
+}
 
 /// `zip_stat_t` layout, mirroring libzip's `zip_stat` struct
 /// (`valid`,`name`,`index`,`size`,`comp_size`,`mtime`,`crc`,`comp_method`,
@@ -68,8 +179,21 @@ struct Zip {
     /// Names as owned C strings (index-aligned with `archive`), so
     /// `zip_get_name`/`zip_stat` can return stable pointers valid until close.
     names: Vec<Option<CString>>,
-    last_error: AtomicI32,
-    err_msg: Mutex<CString>,
+    /// Per-entry comments as owned C strings (index-aligned with `archive`).
+    comments: Vec<Option<CString>>,
+    /// Archive (EOCD) comment as an owned C string.
+    archive_comment: Option<CString>,
+    /// Structured error object (the `zip_error_t` returned by `zip_get_error`).
+    error: Mutex<ZipErrorState>,
+    // ---- write/edit state (materialized on `zip_close`) ----
+    /// Path to write the archive to on close (the path passed to `zip_open`).
+    path: Option<CString>,
+    /// Flags passed to `zip_open` (ZIP_CREATE / ZIP_TRUNCATE / ...).
+    flags: c_int,
+    /// Whether the file existed when the archive was opened.
+    existed: bool,
+    /// Pending write operations.
+    pending: Mutex<PendingOps>,
 }
 
 /// The Rust state behind an opaque `zip_file_t*` (an open entry reader).
@@ -84,9 +208,22 @@ struct ZipFile {
 }
 
 impl Zip {
-    fn set_err(&self, code: i32) {
-        self.last_error.store(code, Ordering::Relaxed);
-        *self.err_msg.lock().unwrap() = CString::new(err_str(code)).unwrap_or_default();
+    fn set_err(&self, code: i32, sys: i32) {
+        let mut g = self.error.lock().unwrap_or_else(|e| e.into_inner());
+        g.ze.zip_err = code;
+        g.ze.sys_err = sys;
+        let s = CString::new(err_str(code)).unwrap_or_default();
+        g.ze.str = s.as_ptr() as *mut c_char;
+        g.owned = Some(s);
+    }
+
+    /// Reject a write operation on a read-only archive (`ZIP_RDONLY`).
+    fn check_writable(&self) -> Result<(), i32> {
+        if self.flags & ZIP_RDONLY != 0 {
+            self.set_err(ZipErrorCode::Rdonly.as_i32(), 0);
+            return Err(-1);
+        }
+        Ok(())
     }
 }
 
@@ -197,33 +334,67 @@ pub const MAX_OPEN_FILE_SIZE: u64 = 2 * 1024 * 1024 * 1024;
 /// `path` must point to a valid C string; `errorp`, if non-null, must point to
 /// writable `int` storage for the lifetime of the call.
 #[no_mangle]
-pub unsafe extern "C" fn zip_open(path: *const c_char, _flags: c_int, errorp: *mut c_int) -> H {
+pub unsafe extern "C" fn zip_open(path: *const c_char, flags: c_int, errorp: *mut c_int) -> H {
     let r = catch_unwind(AssertUnwindSafe(|| -> Result<H, i32> {
         if path.is_null() {
             return Err(ZipErrorCode::Inval.as_i32());
         }
         let cpath = unsafe { CStr::from_ptr(path) };
         let path = cpath.to_str().map_err(|_| ZipErrorCode::Inval.as_i32())?;
-        let file = std::fs::File::open(path).map_err(|_| ZipErrorCode::Open.as_i32())?;
-        // Bound the whole-file read so a huge/malicious file cannot cause an
-        // unbounded allocation. Read at most MAX_OPEN_FILE_SIZE+1 bytes; if we
-        // got more than the cap, reject the archive with a clear error.
-        let mut bytes = Vec::new();
-        file.take(MAX_OPEN_FILE_SIZE + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|_| ZipErrorCode::Read.as_i32())?;
-        if bytes.len() as u64 > MAX_OPEN_FILE_SIZE {
-            return Err(ZipErrorCode::Memory.as_i32());
+        let existed = std::path::Path::new(path).exists();
+        // Opening a non-existent file requires ZIP_CREATE.
+        if !existed && flags & ZIP_CREATE == 0 {
+            return Err(ZipErrorCode::Open.as_i32());
         }
-        let archive = Archive::open(std::io::Cursor::new(bytes)).map_err(|e| e.code().as_i32())?;
+        // ZIP_TRUNCATE discards any existing content and starts fresh.
+        let truncate = flags & ZIP_TRUNCATE != 0;
+        let archive = if existed && !truncate {
+            let file = std::fs::File::open(path).map_err(|_| ZipErrorCode::Open.as_i32())?;
+            // Bound the whole-file read so a huge/malicious file cannot cause an
+            // unbounded allocation. Read at most MAX_OPEN_FILE_SIZE+1 bytes; if we
+            // got more than the cap, reject the archive with a clear error.
+            let mut bytes = Vec::new();
+            file.take(MAX_OPEN_FILE_SIZE + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|_| ZipErrorCode::Read.as_i32())?;
+            if bytes.len() as u64 > MAX_OPEN_FILE_SIZE {
+                return Err(ZipErrorCode::Memory.as_i32());
+            }
+            Archive::open(std::io::Cursor::new(bytes)).map_err(|e| e.code().as_i32())?
+        } else {
+            // New archive: start from an empty (valid) archive.
+            let empty =
+                write_archive(&[], &CompressOptions::default()).map_err(|e| e.code().as_i32())?;
+            Archive::open(std::io::Cursor::new(empty)).map_err(|e| e.code().as_i32())?
+        };
         let names = (0..archive.len())
             .map(|i| archive.name(i).and_then(|n| CString::new(n).ok()))
             .collect::<Vec<_>>();
+        let comments = (0..archive.len())
+            .map(|i| {
+                archive
+                    .dirent(i)
+                    .and_then(|d| CString::new(d.comment.as_str()).ok())
+            })
+            .collect::<Vec<_>>();
+        let archive_comment = CString::new(archive.comment()).ok();
         let z = Box::new(Zip {
             archive,
             names,
-            last_error: AtomicI32::new(0),
-            err_msg: Mutex::new(CString::new(err_str(0)).unwrap_or_default()),
+            comments,
+            archive_comment,
+            error: Mutex::new(ZipErrorState {
+                ze: zip_error {
+                    zip_err: 0,
+                    sys_err: 0,
+                    str: std::ptr::null_mut(),
+                },
+                owned: Some(CString::new(err_str(0)).unwrap_or_default()),
+            }),
+            path: Some(CString::new(path).unwrap_or_default()),
+            flags,
+            existed,
+            pending: Mutex::new(PendingOps::default()),
         });
         Ok(Box::into_raw(z) as H)
     }));
@@ -257,6 +428,11 @@ pub unsafe extern "C" fn zip_open(path: *const c_char, _flags: c_int, errorp: *m
 
 /// Release an archive opened by [`zip_open`].
 ///
+/// If the archive was opened for writing (`ZIP_CREATE`/`ZIP_TRUNCATE`) or has
+/// pending write operations, the archive is materialized and written to the
+/// path it was opened from before the handle is freed. Otherwise the handle is
+/// simply freed.
+///
 /// # Safety
 ///
 /// `zh` must be a handle returned by [`zip_open`] that has not already been
@@ -268,11 +444,52 @@ pub unsafe extern "C" fn zip_close(zh: H) -> c_int {
             if zh.is_null() {
                 return Err(ZipErrorCode::Inval.as_i32());
             }
+            let z = zh.cast::<Zip>().as_ref().ok_or(-1)?;
+            let should_write = {
+                let pending = z.pending.lock().unwrap_or_else(|e| e.into_inner());
+                !pending.is_empty() || (!z.existed && z.flags & ZIP_CREATE != 0)
+            };
+            if should_write {
+                let bytes = materialize(z)?;
+                let path = z.path.as_ref().ok_or(ZipErrorCode::Inval.as_i32())?;
+                let path_str = std::str::from_utf8(path.to_bytes())
+                    .map_err(|_| ZipErrorCode::Inval.as_i32())?;
+                std::fs::write(path_str, bytes).map_err(|_| ZipErrorCode::Write.as_i32())?;
+            }
             drop(Box::from_raw(zh.cast::<Zip>()));
             Ok(0)
         },
         -1,
     )
+}
+
+/// Materialize the archive's current state (original entries minus deletes,
+/// with renames/replaces applied, plus appended entries) into a fresh ZIP byte
+/// stream.
+fn materialize(z: &Zip) -> Result<Vec<u8>, i32> {
+    let pending = z.pending.lock().unwrap_or_else(|e| e.into_inner());
+    let mut files: Vec<ArchiveFile> = Vec::new();
+    let n = z.archive.len();
+    for i in 0..n {
+        if pending.deletes.contains(&i) {
+            continue;
+        }
+        let name = pending
+            .renames
+            .iter()
+            .find(|(idx, _)| *idx == i)
+            .map(|(_, nm)| nm.clone())
+            .unwrap_or_else(|| z.archive.name(i).unwrap_or("").to_string());
+        let data = match pending.replaces.iter().find(|(idx, _)| *idx == i) {
+            Some((_, d)) => d.clone(),
+            None => z.archive.read_entry(i).map_err(|e| e.code().as_i32())?,
+        };
+        files.push(ArchiveFile::new(name, data));
+    }
+    for add in &pending.adds {
+        files.push(ArchiveFile::new(add.name.clone(), add.data.clone()));
+    }
+    write_archive(&files, &CompressOptions::default()).map_err(|e| e.code().as_i32())
 }
 
 /// Number of entries in the archive, or -1 on error.
@@ -331,14 +548,44 @@ pub unsafe extern "C" fn zip_strerror(zh: H) -> *const c_char {
     guarded(
         || {
             let z = zh.cast::<Zip>().as_ref().ok_or(-1)?;
-            let p = z
-                .err_msg
-                .lock()
-                .map(|g| g.as_ptr())
-                .unwrap_or(std::ptr::null());
-            Ok(p)
+            let g = z.error.lock().unwrap_or_else(|e| e.into_inner());
+            Ok(g.ze.str as *const c_char)
         },
         std::ptr::null(),
+    )
+}
+
+/// Find the index of the first entry named `name`, or -1 (with the archive
+/// error set to `ZIP_ER_NOENT`) if not found.
+///
+/// # Safety
+///
+/// `zh` must be a valid, open handle; `name` must be a NUL-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn zip_name_locate(zh: H, name: *const c_char, _flags: u32) -> i64 {
+    guarded(
+        || {
+            let z = zh.cast::<Zip>().as_ref().ok_or(-1)?;
+            if name.is_null() {
+                z.set_err(ZipErrorCode::Inval.as_i32(), 0);
+                return Err(-1);
+            }
+            let name = match CStr::from_ptr(name).to_str() {
+                Ok(s) => s,
+                Err(_) => {
+                    z.set_err(ZipErrorCode::Inval.as_i32(), 0);
+                    return Err(-1);
+                }
+            };
+            match z.archive.name_locate(name) {
+                Some(idx) => Ok(idx as i64),
+                None => {
+                    z.set_err(ZipErrorCode::Noent.as_i32(), 0);
+                    Err(-1)
+                }
+            }
+        },
+        -1,
     )
 }
 
@@ -379,27 +626,41 @@ pub unsafe extern "C" fn zip_fopen(zh: H, name: *const c_char, _flags: u32) -> H
         || {
             let z = zh.cast::<Zip>().as_ref().ok_or(-1)?;
             if name.is_null() {
-                z.set_err(ZipErrorCode::Inval.as_i32());
+                z.set_err(ZipErrorCode::Inval.as_i32(), 0);
                 return Err(-1);
             }
             let name = match CStr::from_ptr(name).to_str() {
                 Ok(s) => s,
                 Err(_) => {
-                    z.set_err(ZipErrorCode::Inval.as_i32());
+                    z.set_err(ZipErrorCode::Inval.as_i32(), 0);
                     return Err(-1);
                 }
             };
-            match z.archive.open_by_name(name) {
-                Ok(reader) => {
+            match z.archive.name_locate(name) {
+                Some(idx) => {
+                    let data = z.archive.read_entry(idx).map_err(|e| {
+                        z.set_err(e.code().as_i32(), 0);
+                        -1
+                    })?;
+                    let stat = z.archive.stat(idx).map_err(|e| {
+                        z.set_err(e.code().as_i32(), 0);
+                        -1
+                    })?;
+                    let buffered = EntryReader::from_buffer(
+                        data,
+                        stat.crc.unwrap_or(0),
+                        stat.size.unwrap_or(0),
+                        None,
+                    );
                     let f = Box::new(ZipFile {
-                        reader: Mutex::new(reader),
+                        reader: Mutex::new(buffered),
                         last_error: AtomicI32::new(0),
                         err_msg: Mutex::new(CString::new(err_str(0)).unwrap_or_default()),
                     });
                     Ok(Box::into_raw(f) as H)
                 }
-                Err(e) => {
-                    z.set_err(e.code().as_i32());
+                None => {
+                    z.set_err(ZipErrorCode::Noent.as_i32(), 0);
                     Err(-1)
                 }
             }
@@ -419,20 +680,22 @@ pub unsafe extern "C" fn zip_fopen_index(zh: H, index: u64, _flags: u32) -> H {
     guarded(
         || {
             let z = zh.cast::<Zip>().as_ref().ok_or(-1)?;
-            match z.archive.open_entry(index) {
-                Ok(reader) => {
-                    let f = Box::new(ZipFile {
-                        reader: Mutex::new(reader),
-                        last_error: AtomicI32::new(0),
-                        err_msg: Mutex::new(CString::new(err_str(0)).unwrap_or_default()),
-                    });
-                    Ok(Box::into_raw(f) as H)
-                }
-                Err(e) => {
-                    z.set_err(e.code().as_i32());
-                    Err(-1)
-                }
-            }
+            let data = z.archive.read_entry(index).map_err(|e| {
+                z.set_err(e.code().as_i32(), 0);
+                -1
+            })?;
+            let stat = z.archive.stat(index).map_err(|e| {
+                z.set_err(e.code().as_i32(), 0);
+                -1
+            })?;
+            let buffered =
+                EntryReader::from_buffer(data, stat.crc.unwrap_or(0), stat.size.unwrap_or(0), None);
+            let f = Box::new(ZipFile {
+                reader: Mutex::new(buffered),
+                last_error: AtomicI32::new(0),
+                err_msg: Mutex::new(CString::new(err_str(0)).unwrap_or_default()),
+            });
+            Ok(Box::into_raw(f) as H)
         },
         std::ptr::null_mut(),
     )
@@ -568,7 +831,7 @@ pub unsafe extern "C" fn zip_stat(
             let name = CStr::from_ptr(fname).to_str().map_err(|_| -1)?;
             let idx = z.archive.name_locate(name).ok_or(-1)?;
             let stat = z.archive.stat(idx).map_err(|e| {
-                z.set_err(e.code().as_i32());
+                z.set_err(e.code().as_i32(), 0);
                 -1
             })?;
             Ok(fill_stat(z, &stat, sb))
@@ -594,12 +857,827 @@ pub unsafe extern "C" fn zip_stat_index(
         || {
             let z = zh.cast::<Zip>().as_ref().ok_or(-1)?;
             let stat = z.archive.stat(index).map_err(|e| {
-                z.set_err(e.code().as_i32());
+                z.set_err(e.code().as_i32(), 0);
                 -1
             })?;
             Ok(fill_stat(z, &stat, sb))
         },
         -1,
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Write / edit path (C ABI)
+// ---------------------------------------------------------------------------
+
+/// Create a buffer-backed `zip_source_t*` from `data[0..len]`.
+///
+/// The data is copied into an owned buffer (so `freep` is ignored). The
+/// returned source must be released with [`zip_source_free`].
+///
+/// # Safety
+///
+/// `data` must point to `len` readable bytes (or be NULL when `len == 0`).
+#[no_mangle]
+pub unsafe extern "C" fn zip_source_buffer(
+    _zh: H,
+    data: *const c_void,
+    len: u64,
+    _freep: c_int,
+) -> H {
+    guarded(
+        || {
+            if data.is_null() && len > 0 {
+                return Err(-1);
+            }
+            let slice = if len > 0 {
+                unsafe { std::slice::from_raw_parts(data.cast::<u8>(), len as usize) }
+            } else {
+                &[]
+            };
+            let src = Box::new(ZipSource {
+                data: slice.to_vec(),
+            });
+            Ok(Box::into_raw(src) as H)
+        },
+        std::ptr::null_mut(),
+    )
+}
+
+/// Release a source created by [`zip_source_buffer`].
+///
+/// # Safety
+///
+/// `source` must be a handle returned by [`zip_source_buffer`] not already
+/// freed.
+#[no_mangle]
+pub unsafe extern "C" fn zip_source_free(source: H) {
+    if !source.is_null() {
+        drop(Box::from_raw(source.cast::<ZipSource>()));
+    }
+}
+
+/// Add a new entry to the archive from `source`, returning its index or -1.
+///
+/// If an entry with the same name already exists and `flags` has
+/// `ZIP_FL_OVERWRITE`, the existing entry is replaced; otherwise the archive
+/// error is set to `ZIP_ER_EXISTS` and -1 is returned. The change is applied
+/// when the archive is closed with [`zip_close`].
+///
+/// # Safety
+///
+/// `zh` must be a valid, open handle; `name` a NUL-terminated C string;
+/// `source` a valid source from [`zip_source_buffer`].
+#[no_mangle]
+pub unsafe extern "C" fn zip_file_add(zh: H, name: *const c_char, source: H, flags: u32) -> i64 {
+    guarded(
+        || {
+            let z = zh.cast::<Zip>().as_ref().ok_or(-1)?;
+            z.check_writable()?;
+            if name.is_null() || source.is_null() {
+                z.set_err(ZipErrorCode::Inval.as_i32(), 0);
+                return Err(-1);
+            }
+            let name = match CStr::from_ptr(name).to_str() {
+                Ok(s) => s.to_string(),
+                Err(_) => {
+                    z.set_err(ZipErrorCode::Inval.as_i32(), 0);
+                    return Err(-1);
+                }
+            };
+            let src = source.cast::<ZipSource>().as_ref().ok_or(-1)?;
+            let data = src.data.clone();
+            let mut pending = z.pending.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(idx) = z.archive.name_locate(&name) {
+                if flags & ZIP_FL_OVERWRITE != 0 {
+                    pending.replaces.push((idx, data));
+                    return Ok(idx as i64);
+                }
+                z.set_err(ZipErrorCode::Exists.as_i32(), 0);
+                return Err(-1);
+            }
+            let new_index = z.archive.len() + pending.adds.len() as u64;
+            pending.adds.push(PendingAdd { name, data });
+            Ok(new_index as i64)
+        },
+        -1,
+    )
+}
+
+/// Add a directory entry named `name` (a trailing `/` is appended if missing),
+/// returning its index or -1.
+///
+/// # Safety
+///
+/// `zh` must be a valid, open handle; `name` a NUL-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn zip_dir_add(zh: H, name: *const c_char, _flags: u32) -> i64 {
+    guarded(
+        || {
+            let z = zh.cast::<Zip>().as_ref().ok_or(-1)?;
+            z.check_writable()?;
+            if name.is_null() {
+                z.set_err(ZipErrorCode::Inval.as_i32(), 0);
+                return Err(-1);
+            }
+            let name = match CStr::from_ptr(name).to_str() {
+                Ok(s) => s.to_string(),
+                Err(_) => {
+                    z.set_err(ZipErrorCode::Inval.as_i32(), 0);
+                    return Err(-1);
+                }
+            };
+            let dirname = if name.ends_with('/') {
+                name
+            } else {
+                format!("{name}/")
+            };
+            let mut pending = z.pending.lock().unwrap_or_else(|e| e.into_inner());
+            if z.archive.name_locate(&dirname).is_some() {
+                z.set_err(ZipErrorCode::Exists.as_i32(), 0);
+                return Err(-1);
+            }
+            let new_index = z.archive.len() + pending.adds.len() as u64;
+            pending.adds.push(PendingAdd {
+                name: dirname,
+                data: Vec::new(),
+            });
+            Ok(new_index as i64)
+        },
+        -1,
+    )
+}
+
+/// Mark the entry at `index` for deletion (applied on [`zip_close`]).
+///
+/// # Safety
+///
+/// `zh` must be a valid, open handle.
+#[no_mangle]
+pub unsafe extern "C" fn zip_delete(zh: H, index: u64) -> c_int {
+    guarded(
+        || {
+            let z = zh.cast::<Zip>().as_ref().ok_or(-1)?;
+            z.check_writable()?;
+            if index >= z.archive.len() {
+                z.set_err(ZipErrorCode::Inval.as_i32(), 0);
+                return Err(-1);
+            }
+            let mut pending = z.pending.lock().unwrap_or_else(|e| e.into_inner());
+            if !pending.deletes.contains(&index) {
+                pending.deletes.push(index);
+            }
+            Ok(0)
+        },
+        -1,
+    )
+}
+
+/// Rename the entry at `index` to `name` (applied on [`zip_close`]).
+///
+/// # Safety
+///
+/// `zh` must be a valid, open handle; `name` a NUL-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn zip_rename(zh: H, index: u64, name: *const c_char) -> c_int {
+    guarded(
+        || {
+            let z = zh.cast::<Zip>().as_ref().ok_or(-1)?;
+            z.check_writable()?;
+            if index >= z.archive.len() || name.is_null() {
+                z.set_err(ZipErrorCode::Inval.as_i32(), 0);
+                return Err(-1);
+            }
+            let name = match CStr::from_ptr(name).to_str() {
+                Ok(s) => s.to_string(),
+                Err(_) => {
+                    z.set_err(ZipErrorCode::Inval.as_i32(), 0);
+                    return Err(-1);
+                }
+            };
+            let mut pending = z.pending.lock().unwrap_or_else(|e| e.into_inner());
+            pending.renames.push((index, name));
+            Ok(0)
+        },
+        -1,
+    )
+}
+
+/// Replace the entry at `index` with the data from `source` (applied on
+/// [`zip_close`]).
+///
+/// # Safety
+///
+/// `zh` must be a valid, open handle; `source` a valid source from
+/// [`zip_source_buffer`].
+#[no_mangle]
+pub unsafe extern "C" fn zip_file_replace(zh: H, index: u64, source: H, _flags: u32) -> c_int {
+    guarded(
+        || {
+            let z = zh.cast::<Zip>().as_ref().ok_or(-1)?;
+            z.check_writable()?;
+            if index >= z.archive.len() || source.is_null() {
+                z.set_err(ZipErrorCode::Inval.as_i32(), 0);
+                return Err(-1);
+            }
+            let src = source.cast::<ZipSource>().as_ref().ok_or(-1)?;
+            let data = src.data.clone();
+            let mut pending = z.pending.lock().unwrap_or_else(|e| e.into_inner());
+            pending.replaces.push((index, data));
+            Ok(0)
+        },
+        -1,
+    )
+}
+
+/// Discard all pending changes and free the archive handle without writing.
+///
+/// # Safety
+///
+/// `zh` must be a valid, open handle not already closed.
+#[no_mangle]
+pub unsafe extern "C" fn zip_discard(zh: H) {
+    if !zh.is_null() {
+        drop(Box::from_raw(zh.cast::<Zip>()));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Structured error object API (zip_error_t)
+// ---------------------------------------------------------------------------
+
+/// Return a pointer to the archive's `zip_error_t`, valid until the next error
+/// is set on the handle.
+///
+/// # Safety
+///
+/// `zh` must be a valid, open handle.
+#[no_mangle]
+pub unsafe extern "C" fn zip_get_error(zh: H) -> *mut zip_error {
+    guarded(
+        || {
+            let z = zh.cast::<Zip>().as_ref().ok_or(-1)?;
+            let g = z.error.lock().unwrap_or_else(|e| e.into_inner());
+            Ok(&g.ze as *const zip_error as *mut zip_error)
+        },
+        std::ptr::null_mut(),
+    )
+}
+
+/// Clear the archive's error (set to `ZIP_ER_OK`).
+///
+/// # Safety
+///
+/// `zh` must be a valid, open handle.
+#[no_mangle]
+pub unsafe extern "C" fn zip_error_clear(zh: H) {
+    if !zh.is_null() {
+        if let Some(z) = zh.cast::<Zip>().as_ref() {
+            z.set_err(0, 0);
+        }
+    }
+}
+
+/// Initialize a caller-owned `zip_error_t` to `ZIP_ER_OK`.
+///
+/// # Safety
+///
+/// `ze` must point to writable `zip_error` storage.
+#[no_mangle]
+pub unsafe extern "C" fn zip_error_init(ze: *mut zip_error) {
+    if !ze.is_null() {
+        unsafe {
+            (*ze).zip_err = 0;
+            (*ze).sys_err = 0;
+            (*ze).str = std::ptr::null_mut();
+        }
+    }
+}
+
+/// Initialize a caller-owned `zip_error_t` with a zip error code.
+///
+/// # Safety
+///
+/// `ze` must point to writable `zip_error` storage.
+#[no_mangle]
+pub unsafe extern "C" fn zip_error_init_with_code(ze: *mut zip_error, code: c_int) {
+    if !ze.is_null() {
+        unsafe {
+            (*ze).zip_err = code;
+            (*ze).sys_err = 0;
+            (*ze).str = CString::new(err_str(code)).unwrap_or_default().into_raw();
+        }
+    }
+}
+
+/// Set a caller-owned `zip_error_t`'s zip and system error codes.
+///
+/// # Safety
+///
+/// `ze` must point to writable `zip_error` storage.
+#[no_mangle]
+pub unsafe extern "C" fn zip_error_set(ze: *mut zip_error, zip_err: c_int, sys_err: c_int) {
+    if !ze.is_null() {
+        unsafe {
+            if !(*ze).str.is_null() {
+                drop(CString::from_raw((*ze).str));
+            }
+            (*ze).zip_err = zip_err;
+            (*ze).sys_err = sys_err;
+            (*ze).str = CString::new(err_str(zip_err))
+                .unwrap_or_default()
+                .into_raw();
+        }
+    }
+}
+
+/// Return the error string for a `zip_error_t`, allocating it if needed.
+///
+/// # Safety
+///
+/// `ze` must point to a valid `zip_error`.
+#[no_mangle]
+pub unsafe extern "C" fn zip_error_strerror(ze: *mut zip_error) -> *const c_char {
+    guarded(
+        || {
+            if ze.is_null() {
+                return Err(-1);
+            }
+            unsafe {
+                if (*ze).str.is_null() {
+                    (*ze).str = CString::new(err_str((*ze).zip_err))
+                        .unwrap_or_default()
+                        .into_raw();
+                }
+                Ok((*ze).str as *const c_char)
+            }
+        },
+        std::ptr::null(),
+    )
+}
+
+/// Return the zip error code of a `zip_error_t`.
+///
+/// # Safety
+///
+/// `ze` must point to a valid `zip_error`.
+#[no_mangle]
+pub unsafe extern "C" fn zip_error_code_zip(ze: *const zip_error) -> c_int {
+    guarded(
+        || {
+            if ze.is_null() {
+                return Err(-1);
+            }
+            Ok(unsafe { (*ze).zip_err })
+        },
+        -1,
+    )
+}
+
+/// Return the system error code of a `zip_error_t`.
+///
+/// # Safety
+///
+/// `ze` must point to a valid `zip_error`.
+#[no_mangle]
+pub unsafe extern "C" fn zip_error_code_system(ze: *const zip_error) -> c_int {
+    guarded(
+        || {
+            if ze.is_null() {
+                return Err(-1);
+            }
+            Ok(unsafe { (*ze).sys_err })
+        },
+        -1,
+    )
+}
+
+/// Free the resources of a caller-owned `zip_error_t` and reset it.
+///
+/// # Safety
+///
+/// `ze` must point to a valid `zip_error`.
+#[no_mangle]
+pub unsafe extern "C" fn zip_error_fini(ze: *mut zip_error) {
+    if !ze.is_null() {
+        unsafe {
+            if !(*ze).str.is_null() {
+                drop(CString::from_raw((*ze).str));
+                (*ze).str = std::ptr::null_mut();
+            }
+            (*ze).zip_err = 0;
+            (*ze).sys_err = 0;
+        }
+    }
+}
+
+/// Format a `(zip_err, sys_err)` pair into `buf` (deprecated libzip helper).
+/// Returns the number of bytes written (excluding the NUL).
+///
+/// # Safety
+///
+/// `buf` must point to `len` writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn zip_error_to_str(
+    buf: *mut c_char,
+    len: u64,
+    ze: c_int,
+    se: c_int,
+) -> c_int {
+    guarded(
+        || {
+            if buf.is_null() {
+                return Err(-1);
+            }
+            let zs = err_str(ze);
+            let s = if se != 0 {
+                format!("{zs}: {se}")
+            } else {
+                zs.to_string()
+            };
+            let bytes = s.as_bytes();
+            let n = (bytes.len() as u64).min(len.saturating_sub(1)) as usize;
+            unsafe {
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf.cast::<u8>(), n);
+                *buf.add(n) = 0;
+            }
+            Ok(n as c_int)
+        },
+        -1,
+    )
+}
+
+/// Return the system-error type of a `zip_error_t` (`ZIP_ET_NONE`/`ZIP_ET_SYS`).
+///
+/// # Safety
+///
+/// `ze` must point to a valid `zip_error`.
+#[no_mangle]
+pub unsafe extern "C" fn zip_error_system_type(ze: *const zip_error) -> c_int {
+    guarded(
+        || {
+            if ze.is_null() {
+                return Err(-1);
+            }
+            Ok(if unsafe { (*ze).sys_err } != 0 {
+                ZIP_ET_SYS
+            } else {
+                ZIP_ET_NONE
+            })
+        },
+        -1,
+    )
+}
+
+/// Deprecated: copy the archive's zip/system error codes into `zep`/`sep`.
+///
+/// # Safety
+///
+/// `zh` must be a valid, open handle; `zep`/`sep` (if non-null) writable ints.
+#[no_mangle]
+pub unsafe extern "C" fn zip_error_get(zh: H, zep: *mut c_int, sep: *mut c_int) {
+    if !zh.is_null() {
+        if let Some(z) = zh.cast::<Zip>().as_ref() {
+            let g = z.error.lock().unwrap_or_else(|e| e.into_inner());
+            if !zep.is_null() {
+                unsafe { *zep = g.ze.zip_err };
+            }
+            if !sep.is_null() {
+                unsafe { *sep = g.ze.sys_err };
+            }
+        }
+    }
+}
+
+/// Set a `zip_error_t` from a source's error. Our buffer sources carry no
+/// error, so this resets the error to `ZIP_ER_OK`.
+///
+/// # Safety
+///
+/// `ze` must point to writable `zip_error` storage.
+#[no_mangle]
+pub unsafe extern "C" fn zip_error_set_from_source(ze: *mut zip_error, _src: H) {
+    if !ze.is_null() {
+        unsafe { zip_error_set(ze, 0, 0) };
+    }
+}
+
+// ---------------------------------------------------------------------------
+// fseek / ftell / seekability
+// ---------------------------------------------------------------------------
+
+/// Seek within an open entry. `whence` is `SEEK_SET`/`SEEK_CUR`/`SEEK_END`.
+/// Returns 0 on success, -1 on error.
+///
+/// # Safety
+///
+/// `fh` must be a valid, open handle from [`zip_fopen`].
+#[no_mangle]
+pub unsafe extern "C" fn zip_fseek(fh: H, offset: i64, whence: c_int) -> i8 {
+    guarded(
+        || {
+            let f = fh.cast::<ZipFile>().as_ref().ok_or(-1)?;
+            let mut reader = f.reader.lock().unwrap_or_else(|e| e.into_inner());
+            let size = reader.expected_size();
+            let cur = reader.position();
+            let target: i64 = match whence {
+                SEEK_SET => offset,
+                SEEK_CUR => cur as i64 + offset,
+                SEEK_END => size as i64 + offset,
+                _ => {
+                    f.set_err(ZipErrorCode::Inval.as_i32());
+                    return Err(-1);
+                }
+            };
+            if target < 0 {
+                f.set_err(ZipErrorCode::Inval.as_i32());
+                return Err(-1);
+            }
+            reader.seek(target as u64).map_err(|_| {
+                f.set_err(ZipErrorCode::Seek.as_i32());
+                -1
+            })?;
+            Ok(0i8)
+        },
+        -1i8,
+    )
+}
+
+/// Return the current read position within an open entry, or -1 on error.
+///
+/// # Safety
+///
+/// `fh` must be a valid, open handle from [`zip_fopen`].
+#[no_mangle]
+pub unsafe extern "C" fn zip_ftell(fh: H) -> i64 {
+    guarded(
+        || {
+            let f = fh.cast::<ZipFile>().as_ref().ok_or(-1)?;
+            let reader = f.reader.lock().unwrap_or_else(|e| e.into_inner());
+            Ok(reader.position() as i64)
+        },
+        -1,
+    )
+}
+
+/// Return 1 if the open entry is seekable, 0 otherwise.
+///
+/// # Safety
+///
+/// `fh` must be a valid, open handle from [`zip_fopen`].
+#[no_mangle]
+pub unsafe extern "C" fn zip_file_is_seekable(fh: H) -> c_int {
+    guarded(
+        || {
+            let f = fh.cast::<ZipFile>().as_ref().ok_or(-1)?;
+            let reader = f.reader.lock().unwrap_or_else(|e| e.into_inner());
+            Ok(if reader.is_seekable() { 1 } else { 0 })
+        },
+        -1,
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Method-support queries
+// ---------------------------------------------------------------------------
+
+/// Return 1 if the compression `method` is supported for compression
+/// (`compress != 0`) or decompression (`compress == 0`).
+#[no_mangle]
+pub extern "C" fn zip_compression_method_supported(method: i32, compress: c_int) -> c_int {
+    match method {
+        ZIP_CM_DEFAULT | ZIP_CM_STORE | ZIP_CM_DEFLATE => 1,
+        ZIP_CM_BZIP2 => {
+            // We can decompress bzip2 but not compress it.
+            if compress != 0 {
+                0
+            } else {
+                1
+            }
+        }
+        _ => 0,
+    }
+}
+
+/// Return 1 if the encryption `method` is supported for encoding
+/// (`encode != 0`) or decoding (`encode == 0`). Only `ZIP_EM_NONE` is
+/// supported (encryption is deferred).
+#[no_mangle]
+pub extern "C" fn zip_encryption_method_supported(method: u16, _encode: c_int) -> c_int {
+    if method == ZIP_EM_NONE {
+        1
+    } else {
+        0
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Comments & extra fields (read side)
+// ---------------------------------------------------------------------------
+
+/// Return the archive (EOCD) comment, or NULL. If `lenp` is non-null, the
+/// comment length is written to it.
+///
+/// # Safety
+///
+/// `zh` must be a valid, open handle; `lenp` (if non-null) writable storage.
+#[no_mangle]
+pub unsafe extern "C" fn zip_get_archive_comment(
+    zh: H,
+    lenp: *mut c_int,
+    _flags: u32,
+) -> *const c_char {
+    guarded(
+        || {
+            let z = zh.cast::<Zip>().as_ref().ok_or(-1)?;
+            let p = z
+                .archive_comment
+                .as_ref()
+                .map(|c| c.as_ptr())
+                .unwrap_or(std::ptr::null());
+            if !lenp.is_null() {
+                unsafe {
+                    *lenp = z
+                        .archive_comment
+                        .as_ref()
+                        .map(|c| c.as_bytes().len() as c_int)
+                        .unwrap_or(0);
+                }
+            }
+            Ok(p)
+        },
+        std::ptr::null(),
+    )
+}
+
+/// Return the comment of the entry at `index`, or NULL. If `lenp` is non-null,
+/// the comment length is written to it.
+///
+/// # Safety
+///
+/// `zh` must be a valid, open handle; `lenp` (if non-null) writable storage.
+#[no_mangle]
+pub unsafe extern "C" fn zip_file_get_comment(
+    zh: H,
+    index: u64,
+    lenp: *mut c_int,
+    _flags: u32,
+) -> *const c_char {
+    guarded(
+        || {
+            let z = zh.cast::<Zip>().as_ref().ok_or(-1)?;
+            let p = z
+                .comments
+                .get(index as usize)
+                .and_then(|c| c.as_ref())
+                .map(|c| c.as_ptr())
+                .unwrap_or(std::ptr::null());
+            if !lenp.is_null() {
+                unsafe {
+                    *lenp = z
+                        .comments
+                        .get(index as usize)
+                        .and_then(|c| c.as_ref())
+                        .map(|c| c.as_bytes().len() as c_int)
+                        .unwrap_or(0);
+                }
+            }
+            Ok(p)
+        },
+        std::ptr::null(),
+    )
+}
+
+/// Number of extra fields of the entry at `index`, or -1 on error.
+///
+/// # Safety
+///
+/// `zh` must be a valid, open handle.
+#[no_mangle]
+pub unsafe extern "C" fn zip_file_extra_fields_count(zh: H, index: u64, _flags: u32) -> i16 {
+    guarded(
+        || {
+            let z = zh.cast::<Zip>().as_ref().ok_or(-1)?;
+            let d = z.archive.dirent(index).ok_or(-1)?;
+            Ok(d.extra_fields.len() as i16)
+        },
+        -1,
+    )
+}
+
+/// Number of extra fields with id `id` of the entry at `index`, or -1 on error.
+///
+/// # Safety
+///
+/// `zh` must be a valid, open handle.
+#[no_mangle]
+pub unsafe extern "C" fn zip_file_extra_fields_count_by_id(
+    zh: H,
+    index: u64,
+    id: u16,
+    _flags: u32,
+) -> i16 {
+    guarded(
+        || {
+            let z = zh.cast::<Zip>().as_ref().ok_or(-1)?;
+            let d = z.archive.dirent(index).ok_or(-1)?;
+            Ok(d.extra_fields.iter().filter(|(i, _)| *i == id).count() as i16)
+        },
+        -1,
+    )
+}
+
+/// Return a pointer to the `idx`-th extra field of the entry at `index` (or
+/// NULL). If `idxp` is non-null, the index of the returned field is written to
+/// it; if `lenp` is non-null, the field's length is written to it.
+///
+/// # Safety
+///
+/// `zh` must be a valid, open handle; `idxp`/`lenp` (if non-null) writable.
+#[no_mangle]
+pub unsafe extern "C" fn zip_file_extra_field_get(
+    zh: H,
+    index: u64,
+    id: u16,
+    idxp: *mut u16,
+    lenp: *mut u16,
+    _flags: u32,
+) -> *const u8 {
+    guarded(
+        || {
+            let z = zh.cast::<Zip>().as_ref().ok_or(-1)?;
+            let d = z.archive.dirent(index).ok_or(-1)?;
+            let mut n = 0u16;
+            let want = if idxp.is_null() { 0 } else { unsafe { *idxp } };
+            let mut found: Option<&Vec<u8>> = None;
+            for (i, data) in &d.extra_fields {
+                if *i == id {
+                    if n == want {
+                        found = Some(data);
+                        break;
+                    }
+                    n += 1;
+                }
+            }
+            match found {
+                Some(data) => {
+                    if !idxp.is_null() {
+                        unsafe { *idxp = n };
+                    }
+                    if !lenp.is_null() {
+                        unsafe { *lenp = data.len() as u16 };
+                    }
+                    Ok(data.as_ptr())
+                }
+                None => Ok(std::ptr::null()),
+            }
+        },
+        std::ptr::null(),
+    )
+}
+
+/// Return a pointer to the `idx`-th extra field with id `id` of the entry at
+/// `index` (or NULL). If `lenp` is non-null, the field's length is written to
+/// it.
+///
+/// # Safety
+///
+/// `zh` must be a valid, open handle; `lenp` (if non-null) writable.
+#[no_mangle]
+pub unsafe extern "C" fn zip_file_extra_field_get_by_id(
+    zh: H,
+    index: u64,
+    id: u16,
+    idx: u16,
+    lenp: *mut u16,
+    _flags: u32,
+) -> *const u8 {
+    guarded(
+        || {
+            let z = zh.cast::<Zip>().as_ref().ok_or(-1)?;
+            let d = z.archive.dirent(index).ok_or(-1)?;
+            let mut n = 0u16;
+            let mut found: Option<&Vec<u8>> = None;
+            for (i, data) in &d.extra_fields {
+                if *i == id {
+                    if n == idx {
+                        found = Some(data);
+                        break;
+                    }
+                    n += 1;
+                }
+            }
+            match found {
+                Some(data) => {
+                    if !lenp.is_null() {
+                        unsafe { *lenp = data.len() as u16 };
+                    }
+                    Ok(data.as_ptr())
+                }
+                None => Ok(std::ptr::null()),
+            }
+        },
+        std::ptr::null(),
     )
 }
 
@@ -620,6 +1698,7 @@ pub extern "C" fn zip_libzip_version() -> *const c_char {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zip_core::constant::magic;
     use zip_core::{write_archive, ArchiveFile, CompressOptions};
 
     /// `err_str` must return the EXACT libzip message string (sentence-case,
@@ -1145,6 +2224,436 @@ mod tests {
             "shared file handle lost or duplicated bytes"
         );
         unsafe { zip_fclose(fh) };
+        unsafe { zip_close(zh) };
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// `zip_name_locate` returns the index of the first entry with the given
+    /// name, or -1 (with the archive error set) when not found.
+    #[test]
+    fn ffi_name_locate() {
+        let path = temp_path("namelocate");
+        build_zip(&path);
+        let cpath = CString::new(path.to_string_lossy().as_bytes()).unwrap();
+        let zh = unsafe { zip_open(cpath.as_ptr(), 0, std::ptr::null_mut()) };
+        assert!(!zh.is_null());
+        assert_eq!(
+            unsafe { zip_name_locate(zh, CString::new("b.bin").unwrap().as_ptr(), 0) },
+            1
+        );
+        assert_eq!(
+            unsafe { zip_name_locate(zh, CString::new("a.txt").unwrap().as_ptr(), 0) },
+            0
+        );
+        // Missing -> -1 and the archive error is set to "No such file".
+        assert_eq!(
+            unsafe { zip_name_locate(zh, CString::new("nope").unwrap().as_ptr(), 0) },
+            -1
+        );
+        assert_eq!(cstr(unsafe { zip_strerror(zh) }), "No such file");
+        unsafe { zip_close(zh) };
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// A C-ABI write -> read round-trip: create a new archive with
+    /// `ZIP_CREATE`, add a file and a directory, close (which writes), reopen
+    /// and read the added content back.
+    #[test]
+    fn ffi_write_roundtrip() {
+        let path = temp_path("write");
+        let cpath = CString::new(path.to_string_lossy().as_bytes()).unwrap();
+        let zh = unsafe { zip_open(cpath.as_ptr(), ZIP_CREATE, std::ptr::null_mut()) };
+        assert!(!zh.is_null(), "zip_open ZIP_CREATE failed");
+
+        let data = b"hello from the C ABI write path".to_vec();
+        let src =
+            unsafe { zip_source_buffer(zh, data.as_ptr() as *const c_void, data.len() as u64, 0) };
+        assert!(!src.is_null());
+        let idx = unsafe { zip_file_add(zh, CString::new("hello.txt").unwrap().as_ptr(), src, 0) };
+        assert!(idx >= 0, "zip_file_add failed");
+        unsafe { zip_source_free(src) };
+
+        let didx = unsafe { zip_dir_add(zh, CString::new("subdir").unwrap().as_ptr(), 0) };
+        assert!(didx >= 0, "zip_dir_add failed");
+
+        assert_eq!(unsafe { zip_close(zh) }, 0);
+
+        // Reopen and verify.
+        let zh2 = unsafe { zip_open(cpath.as_ptr(), 0, std::ptr::null_mut()) };
+        assert!(!zh2.is_null());
+        assert_eq!(unsafe { zip_get_num_entries(zh2, 0) }, 2);
+        assert_eq!(cstr(unsafe { zip_get_name(zh2, 0, 0) }), "hello.txt");
+        assert_eq!(cstr(unsafe { zip_get_name(zh2, 1, 0) }), "subdir/");
+
+        let fh = unsafe { zip_fopen_index(zh2, 0, 0) };
+        assert!(!fh.is_null());
+        let mut out = Vec::new();
+        let mut buf = [0u8; 64];
+        loop {
+            let n = unsafe { zip_fread(fh, buf.as_mut_ptr() as *mut c_void, 64) };
+            assert!(n >= 0);
+            if n == 0 {
+                break;
+            }
+            out.extend_from_slice(&buf[..n as usize]);
+        }
+        assert_eq!(out, data);
+        unsafe { zip_fclose(fh) };
+        unsafe { zip_close(zh2) };
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// `zip_file_add` with a duplicate name (no `ZIP_FL_OVERWRITE`) sets
+    /// `ZIP_ER_EXISTS`; with `ZIP_FL_OVERWRITE` it replaces the existing entry.
+    #[test]
+    fn ffi_file_add_overwrite_and_exists() {
+        let path = temp_path("add_overwrite");
+        build_zip(&path); // a.txt, b.bin, empty.txt
+        let cpath = CString::new(path.to_string_lossy().as_bytes()).unwrap();
+        let zh = unsafe { zip_open(cpath.as_ptr(), 0, std::ptr::null_mut()) };
+        assert!(!zh.is_null());
+
+        // Duplicate name without overwrite -> -1 + Exists.
+        let data = b"dup".to_vec();
+        let src =
+            unsafe { zip_source_buffer(zh, data.as_ptr() as *const c_void, data.len() as u64, 0) };
+        assert!(!src.is_null());
+        assert_eq!(
+            unsafe { zip_file_add(zh, CString::new("a.txt").unwrap().as_ptr(), src, 0) },
+            -1
+        );
+        assert_eq!(cstr(unsafe { zip_strerror(zh) }), "File already exists");
+        unsafe { zip_source_free(src) };
+
+        // With ZIP_FL_OVERWRITE -> replaces index 0.
+        let newdata = b"overwritten".to_vec();
+        let src2 = unsafe {
+            zip_source_buffer(
+                zh,
+                newdata.as_ptr() as *const c_void,
+                newdata.len() as u64,
+                0,
+            )
+        };
+        assert!(!src2.is_null());
+        assert_eq!(
+            unsafe {
+                zip_file_add(
+                    zh,
+                    CString::new("a.txt").unwrap().as_ptr(),
+                    src2,
+                    ZIP_FL_OVERWRITE,
+                )
+            },
+            0
+        );
+        unsafe { zip_source_free(src2) };
+        assert_eq!(unsafe { zip_close(zh) }, 0);
+
+        let zh2 = unsafe { zip_open(cpath.as_ptr(), 0, std::ptr::null_mut()) };
+        assert!(!zh2.is_null());
+        assert_eq!(unsafe { zip_get_num_entries(zh2, 0) }, 3);
+        let fh = unsafe { zip_fopen_index(zh2, 0, 0) };
+        assert!(!fh.is_null());
+        let mut out = Vec::new();
+        let mut buf = [0u8; 32];
+        loop {
+            let n = unsafe { zip_fread(fh, buf.as_mut_ptr() as *mut c_void, 32) };
+            assert!(n >= 0);
+            if n == 0 {
+                break;
+            }
+            out.extend_from_slice(&buf[..n as usize]);
+        }
+        assert_eq!(out, newdata);
+        unsafe { zip_fclose(fh) };
+        unsafe { zip_close(zh2) };
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// `zip_delete`/`zip_rename`/`zip_file_replace` are applied on close.
+    #[test]
+    fn ffi_edit_ops() {
+        let path = temp_path("edit");
+        build_zip(&path); // a.txt, b.bin, empty.txt
+        let cpath = CString::new(path.to_string_lossy().as_bytes()).unwrap();
+        let zh = unsafe { zip_open(cpath.as_ptr(), 0, std::ptr::null_mut()) };
+        assert!(!zh.is_null());
+
+        assert_eq!(unsafe { zip_delete(zh, 2) }, 0); // delete empty.txt
+        assert_eq!(
+            unsafe { zip_rename(zh, 0, CString::new("renamed.txt").unwrap().as_ptr()) },
+            0
+        );
+        let newdata = b"replacement content".to_vec();
+        let src = unsafe {
+            zip_source_buffer(
+                zh,
+                newdata.as_ptr() as *const c_void,
+                newdata.len() as u64,
+                0,
+            )
+        };
+        assert!(!src.is_null());
+        assert_eq!(unsafe { zip_file_replace(zh, 1, src, 0) }, 0);
+        unsafe { zip_source_free(src) };
+
+        assert_eq!(unsafe { zip_close(zh) }, 0);
+
+        let zh2 = unsafe { zip_open(cpath.as_ptr(), 0, std::ptr::null_mut()) };
+        assert!(!zh2.is_null());
+        assert_eq!(unsafe { zip_get_num_entries(zh2, 0) }, 2);
+        assert_eq!(cstr(unsafe { zip_get_name(zh2, 0, 0) }), "renamed.txt");
+        assert_eq!(cstr(unsafe { zip_get_name(zh2, 1, 0) }), "b.bin");
+
+        let fh = unsafe { zip_fopen_index(zh2, 1, 0) };
+        assert!(!fh.is_null());
+        let mut out = Vec::new();
+        let mut buf = [0u8; 64];
+        loop {
+            let n = unsafe { zip_fread(fh, buf.as_mut_ptr() as *mut c_void, 64) };
+            assert!(n >= 0);
+            if n == 0 {
+                break;
+            }
+            out.extend_from_slice(&buf[..n as usize]);
+        }
+        assert_eq!(out, newdata);
+        unsafe { zip_fclose(fh) };
+        unsafe { zip_close(zh2) };
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// `zip_discard` frees the handle without writing anything to disk.
+    #[test]
+    fn ffi_discard_does_not_write() {
+        let path = temp_path("discard");
+        let cpath = CString::new(path.to_string_lossy().as_bytes()).unwrap();
+        let zh = unsafe { zip_open(cpath.as_ptr(), ZIP_CREATE, std::ptr::null_mut()) };
+        assert!(!zh.is_null());
+        let data = b"discarded".to_vec();
+        let src =
+            unsafe { zip_source_buffer(zh, data.as_ptr() as *const c_void, data.len() as u64, 0) };
+        assert!(!src.is_null());
+        assert!(unsafe { zip_file_add(zh, CString::new("x.txt").unwrap().as_ptr(), src, 0) } >= 0);
+        unsafe { zip_source_free(src) };
+        unsafe { zip_discard(zh) };
+        assert!(!path.exists(), "zip_discard must not write the archive");
+    }
+
+    /// The structured `zip_error_t` object API: init/set/strerror/code/fini on
+    /// a caller-owned object, plus `zip_get_error`/`zip_error_clear` on the
+    /// archive's error object.
+    #[test]
+    fn ffi_error_object_api() {
+        let mut ze: zip_error = zip_error {
+            zip_err: 0,
+            sys_err: 0,
+            str: std::ptr::null_mut(),
+        };
+        unsafe { zip_error_init(&mut ze) };
+        assert_eq!(unsafe { zip_error_code_zip(&ze) }, 0);
+        unsafe { zip_error_set(&mut ze, ZipErrorCode::Noent.as_i32(), 0) };
+        assert_eq!(
+            unsafe { zip_error_code_zip(&ze) },
+            ZipErrorCode::Noent.as_i32()
+        );
+        assert_eq!(cstr(unsafe { zip_error_strerror(&mut ze) }), "No such file");
+        assert_eq!(unsafe { zip_error_system_type(&ze) }, ZIP_ET_NONE);
+        unsafe { zip_error_fini(&mut ze) };
+        assert!(ze.str.is_null());
+
+        let mut ze2: zip_error = zip_error {
+            zip_err: 0,
+            sys_err: 0,
+            str: std::ptr::null_mut(),
+        };
+        unsafe { zip_error_init_with_code(&mut ze2, ZipErrorCode::Inval.as_i32()) };
+        assert_eq!(
+            unsafe { zip_error_code_zip(&ze2) },
+            ZipErrorCode::Inval.as_i32()
+        );
+        assert_eq!(
+            cstr(unsafe { zip_error_strerror(&mut ze2) }),
+            "Invalid argument"
+        );
+        unsafe { zip_error_fini(&mut ze2) };
+
+        // Archive error object via zip_get_error.
+        let path = temp_path("err_obj");
+        build_zip(&path);
+        let cpath = CString::new(path.to_string_lossy().as_bytes()).unwrap();
+        let zh = unsafe { zip_open(cpath.as_ptr(), 0, std::ptr::null_mut()) };
+        assert!(!zh.is_null());
+        assert!(unsafe { zip_fopen(zh, CString::new("nope").unwrap().as_ptr(), 0) }.is_null());
+        let ze3 = unsafe { zip_get_error(zh) };
+        assert!(!ze3.is_null());
+        assert_eq!(
+            unsafe { zip_error_code_zip(ze3) },
+            ZipErrorCode::Noent.as_i32()
+        );
+        assert_eq!(cstr(unsafe { zip_error_strerror(ze3) }), "No such file");
+        unsafe { zip_error_clear(zh) };
+        assert_eq!(unsafe { zip_error_code_zip(ze3) }, 0);
+        unsafe { zip_close(zh) };
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// `zip_fseek`/`zip_ftell`/`zip_file_is_seekable` on an open entry.
+    #[test]
+    fn ffi_fseek_ftell_seekable() {
+        let path = temp_path("seek");
+        let content = b"0123456789abcdefghijklmnopqrstuvwxyz".to_vec();
+        let files = vec![zip_core::ArchiveFile::new("s.txt", content.clone())];
+        let bytes = zip_core::write_archive(&files, &zip_core::CompressOptions::default()).unwrap();
+        std::fs::write(&path, bytes).unwrap();
+        let cpath = CString::new(path.to_string_lossy().as_bytes()).unwrap();
+        let zh = unsafe { zip_open(cpath.as_ptr(), 0, std::ptr::null_mut()) };
+        assert!(!zh.is_null());
+        let fh = unsafe { zip_fopen_index(zh, 0, 0) };
+        assert!(!fh.is_null());
+        assert_eq!(unsafe { zip_file_is_seekable(fh) }, 1);
+        assert_eq!(unsafe { zip_ftell(fh) }, 0);
+
+        let mut buf = [0u8; 5];
+        assert_eq!(
+            unsafe { zip_fread(fh, buf.as_mut_ptr() as *mut c_void, 5) },
+            5
+        );
+        assert_eq!(&buf, b"01234");
+        assert_eq!(unsafe { zip_ftell(fh) }, 5);
+
+        assert_eq!(unsafe { zip_fseek(fh, 10, SEEK_SET) }, 0);
+        assert_eq!(unsafe { zip_ftell(fh) }, 10);
+        assert_eq!(
+            unsafe { zip_fread(fh, buf.as_mut_ptr() as *mut c_void, 5) },
+            5
+        );
+        assert_eq!(&buf, b"abcde");
+
+        assert_eq!(unsafe { zip_fseek(fh, 5, SEEK_CUR) }, 0);
+        assert_eq!(unsafe { zip_ftell(fh) }, 20);
+        assert_eq!(
+            unsafe { zip_fread(fh, buf.as_mut_ptr() as *mut c_void, 5) },
+            5
+        );
+        assert_eq!(&buf, b"klmno");
+
+        assert_eq!(unsafe { zip_fseek(fh, -3, SEEK_END) }, 0);
+        assert_eq!(unsafe { zip_ftell(fh) }, (content.len() - 3) as i64);
+        assert_eq!(
+            unsafe { zip_fread(fh, buf.as_mut_ptr() as *mut c_void, 3) },
+            3
+        );
+        assert_eq!(&buf[..3], b"xyz");
+
+        unsafe { zip_fclose(fh) };
+        unsafe { zip_close(zh) };
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// `zip_compression_method_supported` / `zip_encryption_method_supported`.
+    #[test]
+    fn ffi_method_supported() {
+        assert_eq!(zip_compression_method_supported(ZIP_CM_STORE, 1), 1);
+        assert_eq!(zip_compression_method_supported(ZIP_CM_DEFLATE, 1), 1);
+        assert_eq!(zip_compression_method_supported(ZIP_CM_DEFAULT, 1), 1);
+        assert_eq!(zip_compression_method_supported(ZIP_CM_BZIP2, 1), 0);
+        assert_eq!(zip_compression_method_supported(ZIP_CM_BZIP2, 0), 1);
+        assert_eq!(zip_compression_method_supported(99, 1), 0);
+        assert_eq!(zip_encryption_method_supported(ZIP_EM_NONE, 1), 1);
+        assert_eq!(zip_encryption_method_supported(1, 1), 0);
+    }
+
+    /// Build a small zip with one stored entry carrying an extra field, a file
+    /// comment, and an archive comment.
+    fn build_zip_with_meta(path: &std::path::Path) {
+        let name = b"a.txt";
+        let content = b"hello";
+        let crc = crc32fast::hash(content);
+        let extra: &[u8] = &[0xFE, 0xCA, 3, 0, 1, 2, 3]; // id=0xCAFE, len=3, data=[1,2,3]
+        let file_comment = b"file comment";
+        let archive_comment = b"archive comment";
+        let mut v = Vec::new();
+        v.extend_from_slice(&magic::LOCAL);
+        v.extend_from_slice(&20u16.to_le_bytes());
+        v.extend_from_slice(&0u16.to_le_bytes());
+        v.extend_from_slice(&0u16.to_le_bytes());
+        v.extend_from_slice(&0u16.to_le_bytes());
+        v.extend_from_slice(&0u16.to_le_bytes());
+        v.extend_from_slice(&crc.to_le_bytes());
+        v.extend_from_slice(&(content.len() as u32).to_le_bytes());
+        v.extend_from_slice(&(content.len() as u32).to_le_bytes());
+        v.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        v.extend_from_slice(&(extra.len() as u16).to_le_bytes());
+        v.extend_from_slice(name);
+        v.extend_from_slice(extra);
+        v.extend_from_slice(content);
+        let cdir_offset = v.len() as u64;
+        v.extend_from_slice(&magic::CENTRAL);
+        v.extend_from_slice(&20u16.to_le_bytes());
+        v.extend_from_slice(&20u16.to_le_bytes());
+        v.extend_from_slice(&0u16.to_le_bytes());
+        v.extend_from_slice(&0u16.to_le_bytes());
+        v.extend_from_slice(&0u16.to_le_bytes());
+        v.extend_from_slice(&0u16.to_le_bytes());
+        v.extend_from_slice(&crc.to_le_bytes());
+        v.extend_from_slice(&(content.len() as u32).to_le_bytes());
+        v.extend_from_slice(&(content.len() as u32).to_le_bytes());
+        v.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        v.extend_from_slice(&(extra.len() as u16).to_le_bytes());
+        v.extend_from_slice(&(file_comment.len() as u16).to_le_bytes());
+        v.extend_from_slice(&0u16.to_le_bytes());
+        v.extend_from_slice(&0u16.to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.extend_from_slice(name);
+        v.extend_from_slice(extra);
+        v.extend_from_slice(file_comment);
+        let cdir_size = (v.len() - cdir_offset as usize) as u64;
+        v.extend_from_slice(&magic::EOCD);
+        v.extend_from_slice(&0u16.to_le_bytes());
+        v.extend_from_slice(&0u16.to_le_bytes());
+        v.extend_from_slice(&1u16.to_le_bytes());
+        v.extend_from_slice(&1u16.to_le_bytes());
+        v.extend_from_slice(&(cdir_size as u32).to_le_bytes());
+        v.extend_from_slice(&(cdir_offset as u32).to_le_bytes());
+        v.extend_from_slice(&(archive_comment.len() as u16).to_le_bytes());
+        v.extend_from_slice(archive_comment);
+        std::fs::write(path, v).unwrap();
+    }
+
+    /// Archive/file comments and extra fields are readable through the ABI.
+    #[test]
+    fn ffi_comments_and_extra_fields_read() {
+        let path = temp_path("meta");
+        build_zip_with_meta(&path);
+        let cpath = CString::new(path.to_string_lossy().as_bytes()).unwrap();
+        let zh = unsafe { zip_open(cpath.as_ptr(), 0, std::ptr::null_mut()) };
+        assert!(!zh.is_null());
+
+        let mut len: c_int = 0;
+        let ac = unsafe { zip_get_archive_comment(zh, &mut len, 0) };
+        assert_eq!(cstr(ac), "archive comment");
+        assert_eq!(len, "archive comment".len() as c_int);
+
+        let mut flen: c_int = 0;
+        let fc = unsafe { zip_file_get_comment(zh, 0, &mut flen, 0) };
+        assert_eq!(cstr(fc), "file comment");
+        assert_eq!(flen, "file comment".len() as c_int);
+
+        assert_eq!(unsafe { zip_file_extra_fields_count(zh, 0, 0) }, 1);
+        assert_eq!(
+            unsafe { zip_file_extra_fields_count_by_id(zh, 0, 0xCAFE, 0) },
+            1
+        );
+        let mut elen: u16 = 0;
+        let ep = unsafe { zip_file_extra_field_get_by_id(zh, 0, 0xCAFE, 0, &mut elen, 0) };
+        assert!(!ep.is_null());
+        assert_eq!(elen, 3);
+        let data = unsafe { std::slice::from_raw_parts(ep, elen as usize) };
+        assert_eq!(data, &[1, 2, 3]);
+
         unsafe { zip_close(zh) };
         std::fs::remove_file(&path).ok();
     }

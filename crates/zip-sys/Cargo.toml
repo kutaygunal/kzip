@@ -15,5 +15,8 @@ crate-type = ["cdylib", "rlib"]
 zip-core = { path = "../zip-core" }
 libc.workspace = true
 
+[dev-dependencies]
+crc32fast.workspace = true
+
 [features]
 default = []
