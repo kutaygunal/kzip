@@ -195,6 +195,29 @@ impl Archive {
         Ok(out)
     }
 
+    /// Read the **raw compressed** (stored) bytes of the entry at `index` — the
+    /// exact bytes that appear in the local data area, **without** decompression
+    /// or decryption. This is the backing for `zip_source_zip` with
+    /// `ZIP_FL_COMPRESSED` / `ZIP_FL_ENCRYPTED` (which expose the compressed,
+    /// possibly-encrypted stream rather than the decompressed content).
+    pub fn read_compressed_entry(&self, index: u64) -> Result<Vec<u8>> {
+        let d = self
+            .entries
+            .get(index as usize)
+            .ok_or_else(|| ZipError::new(ZipErrorCode::Inval))?;
+        if d.comp_size > MAX_CD_SIZE {
+            return Err(ZipError::new(ZipErrorCode::CentralDirTooLarge));
+        }
+        let mut dup = self.src.duplicate()?;
+        dup.seek(SeekFrom::Start(d.offset))
+            .map_err(|e| ZipError::with_system(ZipErrorCode::Seek, e))?;
+        // Parse the local header; this advances to the data start.
+        Dirent::parse_local(&mut dup)?;
+        let mut data = vec![0u8; d.comp_size as usize];
+        reader::read_exact(&mut dup, &mut data)?;
+        Ok(data)
+    }
+
     fn open_dirent(&self, d: &Dirent, password: Option<&[u8]>) -> Result<EntryReader> {
         let mut dup = self.src.duplicate()?;
         dup.seek(SeekFrom::Start(d.offset))
@@ -344,7 +367,7 @@ fn method_to_u16(m: CompressionMethod) -> u16 {
 /// the same host. On ambiguous/nonexistent local times (DST transitions) we
 /// mirror `mktime`'s deterministic pick where possible and fall back to the
 /// UTC interpretation otherwise.
-fn dos_to_unix(dos_time: u16, dos_date: u16) -> u64 {
+pub fn dos_to_unix(dos_time: u16, dos_date: u16) -> u64 {
     let secs = (dos_time & 0x1F) as i64 * 2;
     let mins = ((dos_time >> 5) & 0x3F) as i64;
     let hours = ((dos_time >> 11) & 0x1F) as i64;
@@ -374,6 +397,40 @@ fn dos_to_unix(dos_time: u16, dos_date: u16) -> u64 {
         // yields a value; fall back to the UTC interpretation.
         LocalResult::None => naive.and_utc().timestamp() as u64,
     }
+}
+
+/// Convert a Unix timestamp to a DOS `(time, date)` pair.
+///
+/// Mirrors libzip's `_zip_u2d_time`: the timestamp is interpreted as LOCAL
+/// wall-clock time (via `localtime`), the year is clamped to >= 1980, and the
+/// result is the packed DOS fields. This is the inverse of [`dos_to_unix`] and
+/// round-trips through the same timezone-aware localtime/mktime semantics.
+pub fn unix_to_dos(ut: u64) -> (u16, u16) {
+    use chrono::{DateTime, Datelike, Local, LocalResult, TimeZone, Timelike};
+    // `DateTime::from_timestamp` is timezone-independent (UTC); we then convert
+    // to the local wall-clock fields the same way `localtime` does.
+    let dt = DateTime::from_timestamp(ut as i64, 0).unwrap_or_else(|| {
+        // Extremely large timestamps: clamp to something representable.
+        DateTime::from_timestamp(0x7FFF_FFFF, 0).unwrap()
+    });
+    // Convert the UTC instant to local wall-clock time.
+    let local = match Local.timestamp_opt(ut as i64, 0) {
+        LocalResult::Single(t) => t.naive_local(),
+        LocalResult::Ambiguous(a, _) => a.naive_local(),
+        LocalResult::None => dt.naive_utc(),
+    };
+
+    let mut year = local.year();
+    if year < 1980 {
+        year = 1980; // libzip clamps tm_year to >= 80
+    }
+    let dos_date = (((year - 1980) as u16) << 9)
+        | ((local.month() as u16) << 5)
+        | (local.day() as u16);
+    let dos_time = ((local.hour() as u16) << 11)
+        | ((local.minute() as u16) << 5)
+        | ((local.second() as u16) >> 1);
+    (dos_time, dos_date)
 }
 
 /// Normalize a (year, month, day) triple to a valid calendar date the way

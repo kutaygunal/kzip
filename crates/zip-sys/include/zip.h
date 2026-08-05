@@ -297,6 +297,10 @@ const char *zip_get_archive_comment(zip_t *, int *lenp, zip_flags_t flags);
 const char *zip_file_get_comment(zip_t *, zip_uint64_t index, zip_uint32_t *lenp,
                                  zip_flags_t flags);
 
+/* Legacy alias for zip_file_get_comment (identical signature). */
+const char *zip_get_file_comment(zip_t *, zip_uint64_t index, zip_uint32_t *lenp,
+                                 zip_flags_t flags);
+
 /* Number of extra fields of the entry at `index`, or -1 on error. */
 zip_int16_t zip_file_extra_fields_count(zip_t *, zip_uint64_t index,
                                         zip_flags_t flags);

@@ -12,25 +12,59 @@
 //! parallelism win and, if it monopolized a worker, would hurt the whole pool —
 //! so such files are compressed serially (fall back).
 
-use crate::constant::{flag, magic, CompressionMethod, EF_WINZIP_AES, EF_WINZIP_AES_SIZE, ZIP_CM_WINZIP_AES};
+use crate::constant::{
+    flag, magic, CompressionMethod, EF_WINZIP_AES, EF_WINZIP_AES_SIZE, EXTRA_FIELD_ZIP64,
+    ZIP_CM_WINZIP_AES,
+};
 use crate::error::{Result, ZipError, ZipErrorCode};
 use std::io::Write;
 
 /// A single archive file's raw content, ready for compression.
+///
+/// In addition to name/data this carries the per-entry metadata the write path
+/// must emit: an entry comment, user extra fields, DOS last-mod time/date,
+/// external (host-specific) attributes, and an optional per-entry compression
+/// override. Every metadata field has a safe default so `ArchiveFile::new`
+/// (used throughout the codebase) keeps its existing semantics.
 #[derive(Debug, Clone)]
 pub struct ArchiveFile {
     /// Member name stored in the archive (may contain path separators).
     pub name: String,
     /// Uncompressed content.
     pub data: Vec<u8>,
+    /// Entry comment (raw bytes), or `None` for no comment.
+    pub comment: Option<Vec<u8>>,
+    /// User extra fields `(id, data)`. Internal ZIP64/AES fields are excluded
+    /// by the writer (it manages them itself).
+    pub extra_fields: Vec<(u16, Vec<u8>)>,
+    /// DOS-encoded last modification time.
+    pub last_mod_time: u16,
+    /// DOS-encoded last modification date.
+    pub last_mod_date: u16,
+    /// Host system (upper byte of "version made by"; e.g. `ZIP_OPSYS_UNIX`=3).
+    pub opsys: u8,
+    /// External (host-specific) file attributes.
+    pub external_attributes: u32,
+    /// Per-entry compression method override; `None` falls back to `CompressOptions`.
+    pub method: Option<CompressionMethod>,
+    /// Per-entry deflate level override; `None` falls back to `CompressOptions`.
+    pub level: Option<u32>,
 }
 
 impl ArchiveFile {
-    /// Create a new archive file.
+    /// Create a new archive file with default (unset) metadata.
     pub fn new(name: impl Into<String>, data: impl Into<Vec<u8>>) -> Self {
         ArchiveFile {
             name: name.into(),
             data: data.into(),
+            comment: None,
+            extra_fields: Vec::new(),
+            last_mod_time: 0,
+            last_mod_date: 0,
+            opsys: 3, // ZIP_OPSYS_UNIX
+            external_attributes: 0,
+            method: None,
+            level: None,
         }
     }
 }
@@ -86,6 +120,18 @@ pub struct CompressedFile {
     pub data: Vec<u8>,
     /// Encryption method (0 = none, 1 = traditional PKWARE).
     pub encryption_method: u16,
+    /// Entry comment (raw bytes), or `None`.
+    pub comment: Option<Vec<u8>>,
+    /// User extra fields `(id, data)`.
+    pub extra_fields: Vec<(u16, Vec<u8>)>,
+    /// DOS-encoded last modification time.
+    pub last_mod_time: u16,
+    /// DOS-encoded last modification date.
+    pub last_mod_date: u16,
+    /// Host system (upper byte of "version made by").
+    pub opsys: u8,
+    /// External (host-specific) file attributes.
+    pub external_attributes: u32,
 }
 
 /// Compress a single byte slice. Deterministic given `(method, level, input)`.
@@ -105,16 +151,29 @@ pub fn compress_bytes(data: &[u8], method: CompressionMethod, level: u32) -> Res
 }
 
 /// Compress one archive file.
+///
+/// The effective compression method/level is the per-entry override (if set)
+/// falling back to `CompressOptions`. This is what makes `zip_set_file_compression`
+/// able to select Store/Deflate per entry while keeping the global default for
+/// everything else.
 pub fn compress_file(file: &ArchiveFile, opts: &CompressOptions) -> Result<CompressedFile> {
-    let data = compress_bytes(&file.data, opts.method, opts.level)?;
+    let method = file.method.unwrap_or(opts.method);
+    let level = file.level.unwrap_or(opts.level);
+    let data = compress_bytes(&file.data, method, level)?;
     Ok(CompressedFile {
         name: file.name.clone(),
-        method: method_to_u16(opts.method),
+        method: method_to_u16(method),
         crc: crc32fast::hash(&file.data),
         comp_size: data.len() as u64,
         uncomp_size: file.data.len() as u64,
         data,
         encryption_method: 0,
+        comment: file.comment.clone(),
+        extra_fields: file.extra_fields.clone(),
+        last_mod_time: file.last_mod_time,
+        last_mod_date: file.last_mod_date,
+        opsys: file.opsys,
+        external_attributes: file.external_attributes,
     })
 }
 
@@ -194,7 +253,7 @@ fn method_to_u16(m: CompressionMethod) -> u16 {
 /// with [`crate::Archive::open`]. Entries are written unencrypted.
 pub fn write_archive(files: &[ArchiveFile], opts: &CompressOptions) -> Result<Vec<u8>> {
     let compressed = compress_files(files, opts)?;
-    write_compressed(&compressed)
+    write_compressed(&compressed, &[])
 }
 
 /// Write a complete ZIP archive, encrypting the entries flagged in `encrypt`
@@ -261,28 +320,71 @@ pub fn write_archive_encrypted_methods(
             return Err(ZipError::new(ZipErrorCode::Encrmethnotsupp));
         }
     }
-    write_compressed(&compressed)
+    write_compressed(&compressed, &[])
 }
 
-fn write_compressed(compressed: &[CompressedFile]) -> Result<Vec<u8>> {
+/// Write a complete ZIP archive carrying per-entry metadata plus an archive
+/// (EOCD) comment, optionally encrypting each entry with a per-entry method.
+///
+/// This is the full write-path entry point used by the C ABI layer's
+/// `materialize`: it compresses (with per-entry method/level overrides), applies
+/// encryption, and emits local headers + data + central directory + EOCD with
+/// the archive comment. Pass an empty `methods` slice for an unencrypted
+/// archive and/or an empty `archive_comment` for no archive comment.
+pub fn write_archive_full(
+    files: &[ArchiveFile],
+    opts: &CompressOptions,
+    password: &[u8],
+    methods: &[u16],
+    archive_comment: &[u8],
+) -> Result<Vec<u8>> {
+    let mut compressed = compress_files(files, opts)?;
+    if !methods.is_empty() {
+        if methods.len() != compressed.len() {
+            return Err(ZipError::new(ZipErrorCode::Inval));
+        }
+        for (cf, &em) in compressed.iter_mut().zip(methods) {
+            if em == 0 {
+                continue;
+            }
+            if em == crate::constant::encryption::TRAD_PKWARE {
+                let encrypted = crate::crypto::encrypt_data(password, cf.crc, &cf.data);
+                cf.data = encrypted;
+                cf.comp_size = cf.data.len() as u64;
+                cf.encryption_method = crate::constant::encryption::TRAD_PKWARE;
+            } else if crate::crypto::is_aes_method(em) {
+                let salt = crate::crypto::random_salt(crate::crypto::aes_salt_length(em));
+                let encrypted = crate::crypto::aes_encrypt_data(password, em, &cf.data, &salt);
+                cf.data = encrypted;
+                cf.comp_size = cf.data.len() as u64;
+                cf.encryption_method = em;
+            } else {
+                return Err(ZipError::new(ZipErrorCode::Encrmethnotsupp));
+            }
+        }
+    }
+    write_compressed(&compressed, archive_comment)
+}
+
+fn write_compressed(compressed: &[CompressedFile], archive_comment: &[u8]) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     let mut cdir = Vec::new();
 
     for cf in compressed {
         let offset = out.len() as u64;
-        write_local_header(cf, &mut out);
+        write_local_header(cf, &mut out)?;
         out.extend_from_slice(&cf.data);
-        write_central_entry(cf, offset, &mut cdir);
+        write_central_entry(cf, offset, &mut cdir)?;
     }
 
     let cdir_offset = out.len() as u64;
     out.extend_from_slice(&cdir);
     let cdir_size = cdir.len() as u64;
-    write_eocd(compressed.len() as u16, cdir_size, cdir_offset, &mut out);
+    write_eocd(compressed.len() as u16, cdir_size, cdir_offset, archive_comment, &mut out);
     Ok(out)
 }
 
-fn write_local_header(cf: &CompressedFile, out: &mut Vec<u8>) {
+fn write_local_header(cf: &CompressedFile, out: &mut Vec<u8>) -> Result<()> {
     let aes = crate::crypto::is_aes_method(cf.encryption_method);
     let flags = if cf.encryption_method != 0 {
         if aes {
@@ -296,25 +398,25 @@ fn write_local_header(cf: &CompressedFile, out: &mut Vec<u8>) {
     let method = on_disk_method(cf);
     let crc = if aes { 0 } else { cf.crc };
     let version_needed = if aes { 51u16 } else { 20u16 };
-    let extra = aes_extra_field(cf);
-    let extra_len = extra.as_ref().map(|e| e.len()).unwrap_or(0) as u16;
+    let extra = build_extra(cf)?;
+    let extra_len = u16::try_from(extra.len()).map_err(|_| ZipError::new(ZipErrorCode::Eftoolarge))?;
     out.extend_from_slice(&magic::LOCAL);
     out.extend_from_slice(&version_needed.to_le_bytes());
     out.extend_from_slice(&flags.to_le_bytes()); // bit flags
     out.extend_from_slice(&method.to_le_bytes());
-    out.extend_from_slice(&0u32.to_le_bytes()); // dos time/date = 0
+    out.extend_from_slice(&cf.last_mod_time.to_le_bytes()); // dos time
+    out.extend_from_slice(&cf.last_mod_date.to_le_bytes()); // dos date
     out.extend_from_slice(&crc.to_le_bytes());
     out.extend_from_slice(&(cf.comp_size as u32).to_le_bytes());
     out.extend_from_slice(&(cf.uncomp_size as u32).to_le_bytes());
     out.extend_from_slice(&(cf.name.len() as u16).to_le_bytes());
     out.extend_from_slice(&extra_len.to_le_bytes()); // extra len
     out.extend_from_slice(cf.name.as_bytes());
-    if let Some(e) = &extra {
-        out.extend_from_slice(e);
-    }
+    out.extend_from_slice(&extra);
+    Ok(())
 }
 
-fn write_central_entry(cf: &CompressedFile, offset: u64, cdir: &mut Vec<u8>) {
+fn write_central_entry(cf: &CompressedFile, offset: u64, cdir: &mut Vec<u8>) -> Result<()> {
     let aes = crate::crypto::is_aes_method(cf.encryption_method);
     let flags = if cf.encryption_method != 0 {
         if aes {
@@ -328,28 +430,54 @@ fn write_central_entry(cf: &CompressedFile, offset: u64, cdir: &mut Vec<u8>) {
     let method = on_disk_method(cf);
     let crc = if aes { 0 } else { cf.crc };
     let version_needed = if aes { 51u16 } else { 20u16 };
-    let extra = aes_extra_field(cf);
-    let extra_len = extra.as_ref().map(|e| e.len()).unwrap_or(0) as u16;
+    let extra = build_extra(cf)?;
+    let extra_len = u16::try_from(extra.len()).map_err(|_| ZipError::new(ZipErrorCode::Eftoolarge))?;
+    let comment = cf.comment.as_deref().unwrap_or(&[]);
+    let comment_len =
+        u16::try_from(comment.len()).map_err(|_| ZipError::new(ZipErrorCode::Eftoolarge))?;
     cdir.extend_from_slice(&magic::CENTRAL);
-    cdir.extend_from_slice(&(3u16 << 8 | version_needed).to_le_bytes()); // version made by: unix
+    cdir.extend_from_slice(&(((cf.opsys as u16) << 8) | version_needed).to_le_bytes()); // version made by: host system
     cdir.extend_from_slice(&version_needed.to_le_bytes()); // version needed
     cdir.extend_from_slice(&flags.to_le_bytes()); // bit flags
     cdir.extend_from_slice(&method.to_le_bytes());
-    cdir.extend_from_slice(&0u32.to_le_bytes()); // dos time/date
+    cdir.extend_from_slice(&cf.last_mod_time.to_le_bytes()); // dos time
+    cdir.extend_from_slice(&cf.last_mod_date.to_le_bytes()); // dos date
     cdir.extend_from_slice(&crc.to_le_bytes());
     cdir.extend_from_slice(&(cf.comp_size as u32).to_le_bytes());
     cdir.extend_from_slice(&(cf.uncomp_size as u32).to_le_bytes());
     cdir.extend_from_slice(&(cf.name.len() as u16).to_le_bytes());
     cdir.extend_from_slice(&extra_len.to_le_bytes()); // extra len
-    cdir.extend_from_slice(&0u16.to_le_bytes()); // comment len
+    cdir.extend_from_slice(&comment_len.to_le_bytes()); // comment len
     cdir.extend_from_slice(&0u16.to_le_bytes()); // disk number
     cdir.extend_from_slice(&0u16.to_le_bytes()); // internal attrs
-    cdir.extend_from_slice(&0u32.to_le_bytes()); // external attrs
+    cdir.extend_from_slice(&cf.external_attributes.to_le_bytes()); // external attrs
     cdir.extend_from_slice(&(offset as u32).to_le_bytes());
     cdir.extend_from_slice(cf.name.as_bytes());
-    if let Some(e) = &extra {
-        cdir.extend_from_slice(e);
+    cdir.extend_from_slice(&extra);
+    cdir.extend_from_slice(comment);
+    Ok(())
+}
+
+/// Build the raw extra-field block for an entry: user extra fields (excluding
+/// the internal ZIP64/AES ones the writer manages itself) followed by the
+/// WinZip AES `0x9901` block when the entry is AES-encrypted.
+fn build_extra(cf: &CompressedFile) -> Result<Vec<u8>> {
+    let mut extra = Vec::new();
+    for (id, data) in &cf.extra_fields {
+        if *id == EF_WINZIP_AES || *id == EXTRA_FIELD_ZIP64 {
+            continue;
+        }
+        let len = u16::try_from(data.len()).map_err(|_| ZipError::new(ZipErrorCode::Eftoolarge))?;
+        extra.extend_from_slice(&id.to_le_bytes());
+        extra.extend_from_slice(&len.to_le_bytes());
+        extra.extend_from_slice(data);
     }
+    if crate::crypto::is_aes_method(cf.encryption_method) {
+        if let Some(aes_ef) = aes_extra_field(cf) {
+            extra.extend_from_slice(&aes_ef);
+        }
+    }
+    Ok(extra)
 }
 
 /// The on-disk compression-method field: for WinZip AES entries this is the
@@ -379,7 +507,13 @@ fn aes_extra_field(cf: &CompressedFile) -> Option<Vec<u8>> {
     Some(ef)
 }
 
-fn write_eocd(num_entries: u16, cdir_size: u64, cdir_offset: u64, out: &mut Vec<u8>) {
+fn write_eocd(
+    num_entries: u16,
+    cdir_size: u64,
+    cdir_offset: u64,
+    comment: &[u8],
+    out: &mut Vec<u8>,
+) {
     out.extend_from_slice(&magic::EOCD);
     out.extend_from_slice(&0u16.to_le_bytes()); // this disk
     out.extend_from_slice(&0u16.to_le_bytes()); // disk with cdir
@@ -387,7 +521,8 @@ fn write_eocd(num_entries: u16, cdir_size: u64, cdir_offset: u64, out: &mut Vec<
     out.extend_from_slice(&num_entries.to_le_bytes());
     out.extend_from_slice(&(cdir_size as u32).to_le_bytes());
     out.extend_from_slice(&(cdir_offset as u32).to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes()); // comment len
+    out.extend_from_slice(&(comment.len() as u16).to_le_bytes()); // comment len
+    out.extend_from_slice(comment);
 }
 
 // Silence unused-import warning when the flag module is only used by future

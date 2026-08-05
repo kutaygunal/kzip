@@ -16,6 +16,24 @@ use std::io::{Cursor, Read, Seek};
 /// An extra field record `(id, data)`.
 pub type ExtraField = (u16, Vec<u8>);
 
+/// Serialize a list of extra-field records into their raw on-disk form
+/// (`id` + `len` + `data` for each). The total must fit in a `u16` length
+/// field or this returns `ZIP_ER_EF_TOO_LARGE` (matching libzip). Internal
+/// ZIP64/AES records are the caller's concern (the writer filters them).
+pub fn serialize_extra_fields(fields: &[ExtraField]) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    for (id, data) in fields {
+        let len = u16::try_from(data.len()).map_err(|_| ZipError::new(ZipErrorCode::Eftoolarge))?;
+        out.extend_from_slice(&id.to_le_bytes());
+        out.extend_from_slice(&len.to_le_bytes());
+        out.extend_from_slice(data);
+    }
+    if out.len() > u16::MAX as usize {
+        return Err(ZipError::new(ZipErrorCode::Eftoolarge));
+    }
+    Ok(out)
+}
+
 /// A parsed directory entry (local or central).
 #[derive(Debug, Clone)]
 pub struct Dirent {

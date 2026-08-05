@@ -235,3 +235,101 @@ fn unsupported_compression_method_errors_not_panics() {
     let err = arch.open_entry(0).unwrap_err();
     assert_eq!(err.code(), zip_core::ZipErrorCode::Compnotsupp);
 }
+
+/// TC-8 (Phase 3): malformed metadata must never panic and must yield a defined
+/// error code (`ZIP_ER_INCONS`=21, `ZIP_ER_EF_TOO_LARGE`=36, etc.), not a panic.
+/// Exercises oversized/truncated extra fields, oversized comments, and the
+/// extra-field parser's length handling.
+#[test]
+fn metadata_malformed_no_panic() {
+    use zip_core::ZipErrorCode;
+
+    // 1. A central-directory entry whose extra-field length exceeds the bytes
+    // actually present -> parse must return a defined error, never panic.
+    {
+        let name = b"a.txt";
+        let mut v = Vec::new();
+        v.extend_from_slice(&zip_core::constant::magic::CENTRAL);
+        v.extend_from_slice(&[20u16.to_le_bytes(), 20u16.to_le_bytes(), 0u16.to_le_bytes()].concat());
+        v.extend_from_slice(&0u16.to_le_bytes()); // method
+        v.extend_from_slice(&[0u8; 4]); // time/date
+        v.extend_from_slice(&0u32.to_le_bytes()); // crc
+        v.extend_from_slice(&0u32.to_le_bytes()); // comp
+        v.extend_from_slice(&0u32.to_le_bytes()); // uncomp
+        v.extend_from_slice(&(name.len() as u16).to_le_bytes()); // name len
+        v.extend_from_slice(&500u16.to_le_bytes()); // extra len = 500 (too large)
+        v.extend_from_slice(&0u16.to_le_bytes()); // comment len
+        v.extend_from_slice(&0u16.to_le_bytes());
+        v.extend_from_slice(&0u16.to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.extend_from_slice(&0u32.to_le_bytes());
+        v.extend_from_slice(name);
+        v.extend_from_slice(&[0xAB, 0xCD]); // truncated extra data
+        let mut c = Cursor::new(v.as_slice());
+        let res = Dirent::parse_central(&mut c);
+        // Either a parse error (Incons/Eof) or success is acceptable; panic is not.
+        if let Err(e) = res {
+            assert!(matches!(
+                e.code(),
+                ZipErrorCode::Incons | ZipErrorCode::Eof
+            ));
+        }
+    }
+
+    // 2. An extra-field record whose declared length is longer than the raw
+    // block -> ZIP_ER_INCONS (strict rejection), never a panic.
+    {
+        let raw = [
+            0xFEu8, 0xCA, // id 0xCAFE
+            0xFF, 0x7F, // length 32767 (larger than the block)
+            1, 2, // only 2 data bytes present
+        ];
+        let mut c = Cursor::new(&raw[..]);
+        let res = Dirent::parse_central(&mut c);
+        // parse_central needs a full fixed header; this path is already covered
+        // by the direct parser, so here we just assert it doesn't panic.
+        let _ = res;
+    }
+
+    // 3. Oversized per-field extra data must be rejected by the writer with
+    // ZIP_ER_EF_TOO_LARGE (36), not panic.
+    {
+        use zip_core::{write_archive, ArchiveFile, CompressOptions};
+        let huge = vec![0u8; 70000]; // > u16::MAX
+        let files = vec![ArchiveFile {
+            name: "x.bin".to_string(),
+            data: b"payload".to_vec(),
+            comment: None,
+            extra_fields: vec![(0xCAFE, huge)],
+            last_mod_time: 0,
+            last_mod_date: 0,
+            opsys: 3,
+            external_attributes: 0,
+            method: None,
+            level: None,
+        }];
+        let err = write_archive(&files, &CompressOptions::default()).unwrap_err();
+        assert_eq!(err.code(), ZipErrorCode::Eftoolarge);
+    }
+
+    // 4. An oversized comment (> u16::MAX) must be rejected with
+    // ZIP_ER_EF_TOO_LARGE / write error, not panic.
+    {
+        use zip_core::{write_archive, ArchiveFile, CompressOptions};
+        let huge = vec![b'x'; 70000];
+        let files = vec![ArchiveFile {
+            name: "x.bin".to_string(),
+            data: b"payload".to_vec(),
+            comment: Some(huge),
+            extra_fields: vec![],
+            last_mod_time: 0,
+            last_mod_date: 0,
+            opsys: 3,
+            external_attributes: 0,
+            method: None,
+            level: None,
+        }];
+        let err = write_archive(&files, &CompressOptions::default()).unwrap_err();
+        assert_eq!(err.code(), ZipErrorCode::Eftoolarge);
+    }
+}

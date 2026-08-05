@@ -39,9 +39,9 @@ commits 29ddb0c/a2c4973/36dcc81/ee3b693 — do NOT re-assign. Loop starts at Pha
 | Phase | Description | Priority | Status | Assigned to | Test cases | Committed |
 |-------|-------------|----------|--------|-------------|------------|-----------|
 | 1 | Encryption: ZipCrypto (PKWARE) read+write | Medium | DONE | senior-engineer | results/phase1-tests.md | 27cdd73 |
-| 2 | Encryption: WinZip AES read+write | Medium | DONE | senior-engineer | results/phase2-tests.md | |
-| 3 | Write-path metadata: comments, extra fields, mtime, attrs, compression | Medium | PENDING | | | |
-| 4 | Streaming zip_source_* core (file/function/layered/window/zip) | Low-Med | PENDING | | | |
+| 2 | Encryption: WinZip AES read+write | Medium | DONE | senior-engineer | results/phase2-tests.md | c647936 |
+| 3 | Write-path metadata: comments, extra fields, mtime, attrs, compression | Medium | IN_PROGRESS | senior-engineer | results/phase3-tests.md | |
+| 4 | Streaming zip_source_* core (file/function/layered/window/zip) | Low-Med | IN_PROGRESS | senior-engineer-4 | results/phase4-tests.md | |
 | 5 | zip_open_from_source / zip_fdopen + write-mode sources | Low-Med | PENDING | | | |
 | 6 | Progress & cancel callbacks | Low-Med | PENDING | | | |
 | 7 | Archive flags, unchange*, method-query, file-error APIs | Low-Med | PENDING | | | |
