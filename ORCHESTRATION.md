@@ -42,8 +42,8 @@ commits 29ddb0c/a2c4973/36dcc81/ee3b693 — do NOT re-assign. Loop starts at Pha
 | 2 | Encryption: WinZip AES read+write | Medium | DONE | senior-engineer | results/phase2-tests.md | c647936 |
 | 3 | Write-path metadata: comments, extra fields, mtime, attrs, compression | Medium | DONE | senior-engineer(+fix) | results/phase3-tests.md | f6eb17c |
 | 4 | Streaming zip_source_* core (file/function/layered/window/zip) | Low-Med | DONE (4a+4b) | senior-engineer-4/-4b | results/phase4-tests.md, results/phase4b-tests.md | f6eb17c (4a), b2afeb7 (4b) |
-| 5 | zip_open_from_source / zip_fdopen + write-mode sources | Low-Med | IN_PROGRESS | senior-engineer | results/phase5-tests.md | |
-| 6 | Progress & cancel callbacks | Low-Med | PENDING | | | |
+| 5 | zip_open_from_source / zip_fdopen + write-mode sources | Low-Med | DONE | senior-engineer-5 | results/phase5-tests.md | 88a6ebc |
+| 6 | Progress & cancel callbacks | Low-Med | IN_PROGRESS | senior-engineer | results/phase6-tests.md | |
 | 7 | Archive flags, unchange*, method-query, file-error APIs | Low-Med | PENDING | | | |
 | 8 | Win32 sources + source utility helpers | Low-Med | PENDING | | | |
 

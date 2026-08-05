@@ -2,6 +2,10 @@
 //!
 //! Mirrors the core of libzip's `zip_open`/`zip_get_num_entries`/
 //! `zip_get_name`/`zip_fopen`/`zip_stat` surface for the read path.
+//!
+//! For the *write* path with cooperative progress/cancel callbacks (Phase 6),
+//! see [`write_archive_full_with_progress`] and [`WriteProgressPoll`] (re-exported
+//! here for convenience; the implementation lives in [`crate::compress`]).
 
 use crate::bufferpool::BufferPool;
 use crate::cdir::read_central_dir;
@@ -15,6 +19,10 @@ use crate::reader;
 use crate::source::{Source, Stat};
 use std::io::{Read, SeekFrom};
 use std::sync::{Arc, Mutex};
+
+// Re-export the write-path progress/cancel polling API so it is reachable from
+// the archive module (used by the C ABI layer's materialize path).
+pub use crate::compress::{write_archive_full_with_progress, WriteProgressPoll};
 
 /// A ZIP archive opened for reading.
 ///

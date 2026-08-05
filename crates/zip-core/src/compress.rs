@@ -177,9 +177,91 @@ pub fn compress_file(file: &ArchiveFile, opts: &CompressOptions) -> Result<Compr
     })
 }
 
+/// A cooperative progress/cancel polling callback for the write path.
+///
+/// The closure is invoked at cooperative checkpoints with the number of bytes
+/// completed so far and the total bytes to process. It returns `true` to
+/// request that the enclosing write be aborted with `ZIP_ER_CANCELLED` (no
+/// output is committed); returning `false` continues normally. When no poll is
+/// supplied the write behaves exactly as before (deterministic output, no
+/// behaviour change to bytes).
+pub type WriteProgressPoll<'a> = &'a mut dyn FnMut(u64, u64) -> bool;
+
+/// Internal progress tracker threaded through the write path.
+///
+/// Tracks `completed`/`total` and invokes the user poll at each checkpoint,
+/// mapping a cancel request to [`ZipErrorCode::Cancelled`].
+struct WriteProgress<'a> {
+    total: u64,
+    completed: u64,
+    poll: Option<WriteProgressPoll<'a>>,
+}
+
+impl<'a> WriteProgress<'a> {
+    fn new(total: u64, poll: Option<WriteProgressPoll<'a>>) -> Self {
+        WriteProgress {
+            total,
+            completed: 0,
+            poll,
+        }
+    }
+
+    /// Invoke the poll at the current `completed`/`total` position. Returns
+    /// `Cancelled` if the poll requests cancellation.
+    fn report(&mut self) -> Result<()> {
+        if let Some(p) = self.poll.as_mut() {
+            if p(self.completed, self.total) {
+                return Err(ZipError::new(ZipErrorCode::Cancelled));
+            }
+        }
+        Ok(())
+    }
+
+    /// Advance `completed` by `n` (clamped to `total`) and report.
+    fn advance(&mut self, by: u64) -> Result<()> {
+        self.completed = self.completed.saturating_add(by).min(self.total);
+        self.report()
+    }
+}
+
 /// Compress a batch of files, optionally in parallel, returning results in
 /// **input order** (byte-identical to serial mode).
 pub fn compress_files(
+    files: &[ArchiveFile],
+    opts: &CompressOptions,
+) -> Result<Vec<CompressedFile>> {
+    compress_files_hooked(files, opts, None)
+}
+
+/// Compress a batch of files, reporting progress / checking cancellation via
+/// `progress` at each cooperative checkpoint.
+///
+/// When a progress hook is present the batch is compressed serially (progress
+/// polling is inherently serial and the user callback may not be thread-safe),
+/// still producing byte-identical output. When no hook is present this is
+/// exactly [`compress_files`] (including the parallel path).
+fn compress_files_hooked(
+    files: &[ArchiveFile],
+    opts: &CompressOptions,
+    mut progress: Option<&mut WriteProgress>,
+) -> Result<Vec<CompressedFile>> {
+    if progress.is_some() {
+        let mut out = Vec::with_capacity(files.len());
+        for f in files {
+            if let Some(p) = progress.as_deref_mut() {
+                p.advance(f.data.len() as u64)?;
+            }
+            out.push(compress_file(f, opts)?);
+        }
+        Ok(out)
+    } else {
+        compress_files_parallel_or_serial(files, opts)
+    }
+}
+
+/// The original parallel/serial dispatch (extracted so the hooked path can
+/// force serial while keeping the deterministic parallel behaviour).
+fn compress_files_parallel_or_serial(
     files: &[ArchiveFile],
     opts: &CompressOptions,
 ) -> Result<Vec<CompressedFile>> {
@@ -338,7 +420,38 @@ pub fn write_archive_full(
     methods: &[u16],
     archive_comment: &[u8],
 ) -> Result<Vec<u8>> {
-    let mut compressed = compress_files(files, opts)?;
+    write_archive_full_with_progress(files, opts, password, methods, archive_comment, None)
+}
+
+/// Write a complete ZIP archive carrying per-entry metadata plus an archive
+/// (EOCD) comment, optionally encrypting each entry with a per-entry method,
+/// reporting progress / checking cancellation via `poll` at cooperative
+/// checkpoints.
+///
+/// This is the full write-path entry point used by the C ABI layer's
+/// `materialize`: it compresses (with per-entry method/level overrides), applies
+/// encryption, and emits local headers + data + central directory + EOCD with
+/// the archive comment. Pass an empty `methods` slice for an unencrypted
+/// archive and/or an empty `archive_comment` for no archive comment.
+///
+/// The poll reports `(bytes_completed, bytes_total)` monotonically, reaching
+/// `(total, total)` (progress 1.0) when the archive is fully written. If the
+/// poll returns `true` the write is aborted with `ZIP_ER_CANCELLED` and no
+/// output bytes are produced. When `poll` is `None` the output is byte-identical
+/// to [`write_archive_full`].
+pub fn write_archive_full_with_progress<'a>(
+    files: &[ArchiveFile],
+    opts: &CompressOptions,
+    password: &[u8],
+    methods: &[u16],
+    archive_comment: &[u8],
+    mut poll: Option<WriteProgressPoll<'a>>,
+) -> Result<Vec<u8>> {
+    let total: u64 = files.iter().map(|f| f.data.len() as u64).sum();
+    let mut progress = WriteProgress::new(total, poll.take());
+    progress.report()?;
+
+    let mut compressed = compress_files_hooked(files, opts, Some(&mut progress))?;
     if !methods.is_empty() {
         if methods.len() != compressed.len() {
             return Err(ZipError::new(ZipErrorCode::Inval));
@@ -363,14 +476,27 @@ pub fn write_archive_full(
             }
         }
     }
-    write_compressed(&compressed, archive_comment)
+    let out = write_compressed_hooked(&compressed, archive_comment, Some(&mut progress))?;
+    progress.report()?; // final checkpoint at 100%
+    Ok(out)
 }
 
 fn write_compressed(compressed: &[CompressedFile], archive_comment: &[u8]) -> Result<Vec<u8>> {
+    write_compressed_hooked(compressed, archive_comment, None)
+}
+
+fn write_compressed_hooked(
+    compressed: &[CompressedFile],
+    archive_comment: &[u8],
+    mut progress: Option<&mut WriteProgress>,
+) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     let mut cdir = Vec::new();
 
     for cf in compressed {
+        if let Some(p) = progress.as_deref_mut() {
+            p.report()?;
+        }
         let offset = out.len() as u64;
         write_local_header(cf, &mut out)?;
         out.extend_from_slice(&cf.data);
@@ -775,6 +901,126 @@ mod tests {
         };
         let out = compress_files(&files, &opts).unwrap();
         assert!(out.is_empty());
+    }
+
+    /// TC-1/TC-4 (in-process): progress polls fire monotonically non-decreasing
+    /// and reach `(total, total)`; registering a non-cancelling poll does NOT
+    /// change the produced bytes.
+    #[test]
+    fn write_progress_is_monotonic_and_reaches_total() {
+        let files = sample_files();
+        let opts = CompressOptions::default();
+
+        // Baseline without any hook.
+        let base = write_archive_full(&files, &opts, &[], &[], &[]).unwrap();
+
+        let mut samples: Vec<(u64, u64)> = Vec::new();
+        let mut poll = |completed: u64, total: u64| -> bool {
+            samples.push((completed, total));
+            false
+        };
+        let out = write_archive_full_with_progress(
+            &files,
+            &opts,
+            &[],
+            &[],
+            &[],
+            Some(&mut poll),
+        )
+        .unwrap();
+
+        assert!(
+            samples.len() >= 2,
+            "progress callback must fire at least twice (start + final)"
+        );
+        let mut last = 0u64;
+        for (i, &(c, t)) in samples.iter().enumerate() {
+            assert!(c >= last, "sample {i}: completed went backwards");
+            assert!(c <= t, "sample {i}: completed > total");
+            last = c;
+        }
+        let (final_c, final_t) = *samples.last().unwrap();
+        assert_eq!(final_c, final_t, "final callback must reach total (1.0)");
+
+        // Determinism gate (TC-4): registering a no-op hook changes nothing.
+        assert_eq!(out, base, "registering a non-cancelling poll must not change bytes");
+    }
+
+    /// TC-2 (in-process): a poll that requests cancellation aborts with
+    /// `Cancelled` and no output is produced.
+    #[test]
+    fn write_progress_cancel_aborts() {
+        let files = sample_files();
+        let opts = CompressOptions::default();
+        let mut calls = 0usize;
+        // Cancel as soon as we are asked the first time.
+        let mut poll = |_c: u64, _t: u64| -> bool {
+            calls += 1;
+            true
+        };
+        let err = write_archive_full_with_progress(
+            &files,
+            &opts,
+            &[],
+            &[],
+            &[],
+            Some(&mut poll),
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), ZipErrorCode::Cancelled);
+        assert!(calls >= 1);
+    }
+
+    /// TC-5 (in-process): a poll over a zero-length archive must not panic and
+    /// must still reach a defined final state.
+    #[test]
+    fn write_progress_zero_length_no_panic() {
+        let opts = CompressOptions::default();
+        let files: Vec<ArchiveFile> = Vec::new();
+        let mut samples: Vec<(u64, u64)> = Vec::new();
+        let mut poll = |c: u64, t: u64| -> bool {
+            samples.push((c, t));
+            false
+        };
+        let out = write_archive_full_with_progress(&files, &opts, &[], &[], &[], Some(&mut poll))
+            .unwrap();
+        assert!(!samples.is_empty());
+        assert!(out.len() >= 22, "empty archive must still be a valid zip");
+        let (fc, ft) = *samples.last().unwrap();
+        assert_eq!(fc, ft, "zero-length: completed must equal total at end");
+    }
+
+    /// TC-5 (zip-core): malformed/edge-case progress inputs must never panic:
+    /// a `None` poll, a poll that returns a garbage non-zero on every call, and
+    /// a zero-length archive all yield a defined result.
+    #[test]
+    fn callbacks_malformed_no_panic() {
+        let opts = CompressOptions::default();
+        // None poll (no callbacks registered): plain success, no panic.
+        let out = write_archive_full_with_progress(&sample_files(), &opts, &[], &[], &[], None)
+            .unwrap();
+        assert!(out.len() > 22);
+
+        // Poll that always requests cancellation (garbage non-zero): clean
+        // Cancelled error, no panic.
+        let mut poll = |_c: u64, _t: u64| -> bool { true };
+        let err = write_archive_full_with_progress(
+            &sample_files(),
+            &opts,
+            &[],
+            &[],
+            &[],
+            Some(&mut poll),
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), ZipErrorCode::Cancelled);
+
+        // Zero-length archive with a poll: no panic, valid empty zip.
+        let empty: Vec<ArchiveFile> = Vec::new();
+        let mut poll2 = |_c: u64, _t: u64| -> bool { false };
+        let out2 = write_archive_full_with_progress(&empty, &opts, &[], &[], &[], Some(&mut poll2))
+            .unwrap();
+        assert!(out2.len() >= 22);
     }
 
     #[test]

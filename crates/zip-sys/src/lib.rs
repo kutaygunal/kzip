@@ -57,8 +57,8 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Mutex;
 
 use zip_core::{
-    write_archive, write_archive_full, Archive, ArchiveFile, CompressOptions, EntryReader, Stat,
-    ZipErrorCode,
+    write_archive, write_archive_full, write_archive_full_with_progress, Archive, ArchiveFile,
+    CompressOptions, EntryReader, Stat, ZipErrorCode,
 };
 use zip_core::constant::CompressionMethod;
 
@@ -209,6 +209,61 @@ type ZipSourceCallback =
 /// down the chain via [`zip_source_pass_to_lower_layer`].
 type ZipSourceLayeredCallback =
     Option<unsafe extern "C" fn(lower: H, ud: *mut c_void, data: *mut c_void, len: u64, cmd: c_int) -> i64>;
+
+/// A user-supplied `zip_progress_callback` (`void(*)(zip_t*, double, void*)`).
+/// The `double` is the 0.0..=1.0 progress fraction. The final argument is the
+/// `ud` user-state pointer passed to `zip_register_progress_callback_with_state`.
+type ZipProgressCallback =
+    Option<unsafe extern "C" fn(za: *mut c_void, progress: f64, ud: *mut c_void)>;
+
+/// A user-supplied `zip_cancel_callback` (`int(*)(zip_t*, void*)`). Returns
+/// non-zero to request that the operation be cancelled.
+type ZipCancelCallback =
+    Option<unsafe extern "C" fn(za: *mut c_void, ud: *mut c_void) -> c_int>;
+
+/// A `ud`-freeing callback (`void(*)(void*)`) invoked when a registered
+/// callback's user state is released (on unregister or archive close).
+type ZipUDFreeCallback = Option<unsafe extern "C" fn(ud: *mut c_void)>;
+
+/// The deprecated `zip_progress_callback_t` (`void(*)(double)`).
+type ZipLegacyProgressCallback = Option<unsafe extern "C" fn(progress: f64)>;
+
+/// Registered progress callback + its user state and free hook.
+struct ProgressReg {
+    precision: f64,
+    cb: ZipProgressCallback,
+    ud_free: ZipUDFreeCallback,
+    ud: *mut c_void,
+}
+
+/// Registered cancel callback + its user state and free hook.
+struct CancelReg {
+    cb: ZipCancelCallback,
+    ud_free: ZipUDFreeCallback,
+    ud: *mut c_void,
+}
+
+/// Deprecated progress callback state: a boxed legacy `fn(double)`.
+#[repr(C)]
+struct LegacyProgressUd {
+    callback: ZipLegacyProgressCallback,
+}
+
+unsafe extern "C" fn legacy_progress_wrapper(_za: *mut c_void, progress: f64, ud: *mut c_void) {
+    if ud.is_null() {
+        return;
+    }
+    let lp = unsafe { &*(ud.cast::<LegacyProgressUd>()) };
+    if let Some(cb) = lp.callback {
+        unsafe { cb(progress) };
+    }
+}
+
+unsafe extern "C" fn legacy_progress_ud_free(ud: *mut c_void) {
+    if !ud.is_null() {
+        drop(unsafe { Box::from_raw(ud.cast::<LegacyProgressUd>()) });
+    }
+}
 
 /// `zip_error_t` layout, mirroring libzip's `struct zip_error`
 /// (`zip_err`, `sys_err`, `str`).
@@ -792,6 +847,27 @@ struct Zip {
     pending: Mutex<PendingOps>,
     /// Default password for encrypted entries (set via `zip_set_default_password`).
     password: Mutex<Option<Vec<u8>>>,
+    /// Registered progress callback (Phase 6). `None` = not registered.
+    progress_cb: Mutex<Option<ProgressReg>>,
+    /// Registered cancel callback (Phase 6). `None` = not registered.
+    cancel_cb: Mutex<Option<CancelReg>>,
+}
+
+impl Drop for Zip {
+    fn drop(&mut self) {
+        // Release any registered callbacks' user state via their free hooks
+        // (mirrors libzip's `_zip_progress_free` on archive close).
+        if let Some(reg) = self.progress_cb.lock().ok().and_then(|mut g| g.take()) {
+            if let Some(f) = reg.ud_free {
+                unsafe { f(reg.ud) };
+            }
+        }
+        if let Some(reg) = self.cancel_cb.lock().ok().and_then(|mut g| g.take()) {
+            if let Some(f) = reg.ud_free {
+                unsafe { f(reg.ud) };
+            }
+        }
+    }
 }
 
 /// The Rust state behind an opaque `zip_file_t*` (an open entry reader).
@@ -1202,6 +1278,8 @@ fn make_zip(archive: Archive, flags: c_int, existed: bool, path: Option<CString>
         existed,
         pending: Mutex::new(PendingOps::default()),
         password: Mutex::new(None),
+        progress_cb: Mutex::new(None),
+        cancel_cb: Mutex::new(None),
     });
     Box::into_raw(z) as H
 }
@@ -1455,15 +1533,38 @@ pub unsafe extern "C" fn zip_close(zh: H) -> c_int {
                 let pending = z.pending.lock().unwrap_or_else(|e| e.into_inner());
                 !pending.is_empty() || (!z.existed && z.flags & ZIP_CREATE != 0)
             };
-            if should_write {
-                let bytes = materialize(z)?;
-                let path = z.path.as_ref().ok_or(ZipErrorCode::Inval.as_i32())?;
-                let path_str = std::str::from_utf8(path.to_bytes())
-                    .map_err(|_| ZipErrorCode::Inval.as_i32())?;
-                std::fs::write(path_str, bytes).map_err(|_| ZipErrorCode::Write.as_i32())?;
-            }
+            let write_result: Result<c_int, i32> = (|| -> Result<c_int, i32> {
+                if !should_write {
+                    return Ok(0);
+                }
+                match materialize(z) {
+                    Ok(bytes) => {
+                        let path = z.path.as_ref().ok_or(ZipErrorCode::Inval.as_i32())?;
+                        let path_str = std::str::from_utf8(path.to_bytes())
+                            .map_err(|_| ZipErrorCode::Inval.as_i32())?;
+                        match std::fs::write(path_str, bytes) {
+                            Ok(()) => Ok(0),
+                            Err(_) => {
+                                z.set_err(ZipErrorCode::Write.as_i32(), 0);
+                                Err(ZipErrorCode::Write.as_i32())
+                            }
+                        }
+                    }
+                    // Materialize failed (e.g. a cancel callback aborted with
+                    // ZIP_ER_CANCELLED): record the code on the archive so
+                    // `zip_strerror`/`zip_get_error` report it, and return
+                    // failure without committing any output.
+                    Err(code) => {
+                        z.set_err(code, 0);
+                        Err(code)
+                    }
+                }
+            })();
+            // Always free the handle (running any registered callback `ud_free`
+            // hooks via `Drop`), even on a materialize/write/cancel error, so no
+            // partial/corrupt output is committed and no handle leaks.
             drop(Box::from_raw(zh.cast::<Zip>()));
-            Ok(0)
+            write_result
         },
         -1,
     )
@@ -1560,14 +1661,100 @@ fn materialize(z: &Zip) -> Result<Vec<u8>, i32> {
     } else {
         Vec::new()
     };
-    write_archive_full(
+
+    // ---- Phase 6: cooperative progress / cancel polling ----
+    // Fire the progress callback at 0.0 (libzip `_zip_progress_start`), poll
+    // the cancel callback at each checkpoint, and fire the progress callback at
+    // 1.0 (libzip `_zip_progress_end`) on success.
+    let za: *mut c_void = std::ptr::from_ref(z) as *const Zip as *mut c_void;
+    let has_progress = z
+        .progress_cb
+        .lock()
+        .map(|g| g.as_ref().map_or(false, |p| p.cb.is_some()))
+        .unwrap_or(false);
+    let has_cancel = z
+        .cancel_cb
+        .lock()
+        .map(|g| g.as_ref().map_or(false, |c| c.cb.is_some()))
+        .unwrap_or(false);
+
+    if !has_progress && !has_cancel {
+        // Fast path: no callbacks registered, output is byte-identical to the
+        // pre-Phase-6 writer.
+        return write_archive_full(&files, &CompressOptions::default(), &pw, &methods, &archive_comment)
+            .map_err(|e| e.code().as_i32());
+    }
+
+    if has_progress {
+        if let Some(g) = z.progress_cb.lock().ok() {
+            if let Some(p) = g.as_ref() {
+                if let Some(cb) = p.cb {
+                    unsafe { cb(za, 0.0, p.ud) };
+                }
+            }
+        }
+    }
+
+    let mut last = 0.0f64;
+    let mut poll = |completed: u64, total: u64| -> bool {
+        let mut cancel = false;
+        if has_cancel {
+            if let Some(g) = z.cancel_cb.lock().ok() {
+                if let Some(c) = g.as_ref() {
+                    if let Some(cb) = c.cb {
+                        cancel = unsafe { cb(za, c.ud) } != 0;
+                    }
+                }
+            }
+        }
+        if has_progress {
+            if let Some(g) = z.progress_cb.lock().ok() {
+                if let Some(p) = g.as_ref() {
+                    if let Some(cb) = p.cb {
+                        // Avoid 0/0 -> NaN for a zero-length archive; treat it as
+                        // complete so the final callback reaches 1.0.
+                        let frac = if total == 0 {
+                            1.0
+                        } else {
+                            (completed as f64) / (total as f64)
+                        };
+                        let frac = frac.clamp(0.0, 1.0);
+                        if frac - last > p.precision || (last < 1.0 && frac == 1.0) {
+                            unsafe { cb(za, frac, p.ud) };
+                            last = frac;
+                        }
+                    }
+                }
+            }
+        }
+        cancel
+    };
+
+    let result = write_archive_full_with_progress(
         &files,
         &CompressOptions::default(),
         &pw,
         &methods,
         &archive_comment,
+        Some(&mut poll),
     )
-    .map_err(|e| e.code().as_i32())
+    .map_err(|e| e.code().as_i32());
+
+    match result {
+        Ok(bytes) => {
+            if has_progress {
+                if let Some(g) = z.progress_cb.lock().ok() {
+                    if let Some(p) = g.as_ref() {
+                        if let Some(cb) = p.cb {
+                            unsafe { cb(za, 1.0, p.ud) };
+                        }
+                    }
+                }
+            }
+            Ok(bytes)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Map a libzip compression-method integer to a `CompressionMethod` for writing.
@@ -3850,6 +4037,135 @@ pub unsafe extern "C" fn zip_discard(zh: H) {
     if !zh.is_null() {
         drop(Box::from_raw(zh.cast::<Zip>()));
     }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 6: progress & cancel callbacks
+// ---------------------------------------------------------------------------
+
+/// Register a progress callback with a `ud` user-state pointer and a `ud_free`
+/// hook (mirrors libzip's `zip_register_progress_callback_with_state`).
+///
+/// `precision` throttles callback invocations: a progress update is delivered
+/// only when the reported fraction advances by more than `precision`. The
+/// callback is invoked with the archive handle, the 0.0..=1.0 fraction, and the
+/// `ud` pointer. Registering `NULL`/`None` for `cb` unregisters the progress
+/// callback (releasing the previous `ud` via its free hook).
+///
+/// Returns 0 on success, -1 on a NULL/invalid archive handle.
+///
+/// # Safety
+///
+/// `zh` must be a valid, open handle; `cb`, if non-null, must be a valid C
+/// function pointer; `ud` is passed to `cb` and to `ud_free` unmodified.
+#[no_mangle]
+pub unsafe extern "C" fn zip_register_progress_callback_with_state(
+    zh: H,
+    precision: f64,
+    cb: ZipProgressCallback,
+    ud_free: ZipUDFreeCallback,
+    ud: *mut c_void,
+) -> c_int {
+    guarded(
+        || {
+            let z = zh.cast::<Zip>().as_ref().ok_or(ZipErrorCode::Inval.as_i32())?;
+            let mut g = z.progress_cb.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(old) = g.take() {
+                if let Some(f) = old.ud_free {
+                    unsafe { f(old.ud) };
+                }
+            }
+            if cb.is_some() {
+                *g = Some(ProgressReg {
+                    precision,
+                    cb,
+                    ud_free,
+                    ud,
+                });
+            }
+            Ok(0)
+        },
+        -1,
+    )
+}
+
+/// Register a cancel callback with a `ud` user-state pointer and a `ud_free`
+/// hook (mirrors libzip's `zip_register_cancel_callback_with_state`).
+///
+/// The callback is invoked at each cooperative checkpoint during compression.
+/// Returning non-zero requests cancellation; the enclosing write aborts with
+/// `ZIP_ER_CANCELLED` (32) and no output is committed. Registering `NULL`/`None`
+/// for `cb` unregisters the cancel callback (releasing the previous `ud`).
+///
+/// Returns 0 on success, -1 on a NULL/invalid archive handle.
+///
+/// # Safety
+///
+/// `zh` must be a valid, open handle; `cb`, if non-null, must be a valid C
+/// function pointer; `ud` is passed to `cb` and to `ud_free` unmodified.
+#[no_mangle]
+pub unsafe extern "C" fn zip_register_cancel_callback_with_state(
+    zh: H,
+    cb: ZipCancelCallback,
+    ud_free: ZipUDFreeCallback,
+    ud: *mut c_void,
+) -> c_int {
+    guarded(
+        || {
+            let z = zh.cast::<Zip>().as_ref().ok_or(ZipErrorCode::Inval.as_i32())?;
+            let mut g = z.cancel_cb.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(old) = g.take() {
+                if let Some(f) = old.ud_free {
+                    unsafe { f(old.ud) };
+                }
+            }
+            if cb.is_some() {
+                *g = Some(CancelReg { cb, ud_free, ud });
+            }
+            Ok(0)
+        },
+        -1,
+    )
+}
+
+/// Register a deprecated `zip_progress_callback_t` (`void(*)(double)`, no user
+/// state), mirroring libzip's `zip_register_progress_callback`. It is forwarded
+/// to [`zip_register_progress_callback_with_state`] with an internal wrapper
+/// that delivers the fraction to the legacy callback. Passing `NULL`/`None`
+/// unregisters the progress callback.
+///
+/// # Safety
+///
+/// `zh` must be a valid, open handle; `cb`, if non-null, must be a valid C
+/// function pointer.
+#[no_mangle]
+pub unsafe extern "C" fn zip_register_progress_callback(
+    zh: H,
+    cb: ZipLegacyProgressCallback,
+) {
+    if cb.is_none() {
+        // Unregister (no user state to free).
+        unsafe {
+            zip_register_progress_callback_with_state(
+                zh,
+                0.001,
+                None,
+                None,
+                std::ptr::null_mut(),
+            )
+        };
+        return;
+    }
+    let ud = Box::into_raw(Box::new(LegacyProgressUd { callback: cb })) as *mut c_void;
+    unsafe {
+        zip_register_progress_callback_with_state(
+            zh,
+            0.001,
+            Some(legacy_progress_wrapper),
+            Some(legacy_progress_ud_free),
+            ud,
+        )
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -6149,6 +6465,10 @@ mod tests {
             // Phase 5: open-from-source + fdopen.
             "zip_open_from_source",
             "zip_fdopen",
+            // Phase 6: progress & cancel callbacks.
+            "zip_register_progress_callback",
+            "zip_register_progress_callback_with_state",
+            "zip_register_cancel_callback_with_state",
         ] {
             let found: Result<libloading::Symbol<*mut libc::c_void>, _> =
                 unsafe { lib.get(sym.as_bytes()) };
@@ -7745,5 +8065,361 @@ mod tests {
         let zh2 = unsafe { zip_fdopen(-1, ZIP_CREATE, &mut errp2) };
         assert!(zh2.is_null());
         assert_eq!(errp2, ZipErrorCode::Inval.as_i32());
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 6: progress & cancel callbacks
+    // -----------------------------------------------------------------------
+
+    // Shared callback state for the Phase 6 tests. Callbacks are plain C
+    // functions, so they communicate with the test through statics. Because the
+    // statics are shared, the Phase 6 tests serialize on PHASE6_LOCK so they
+    // cannot clobber each other's state when run concurrently by the harness.
+    static PHASE6_LOCK: Mutex<()> = Mutex::new(());
+    static PROGRESS_SAMPLES: Mutex<Vec<f64>> = Mutex::new(Vec::new());
+    static PROGRESS_STATE: Mutex<usize> = Mutex::new(0);
+    static PROGRESS_STATE_MATCHES: AtomicI32 = AtomicI32::new(1);
+    static CANCEL_FLAG: AtomicI32 = AtomicI32::new(0);
+    static CANCEL_CALLS: AtomicI32 = AtomicI32::new(0);
+    static CANCEL_STATE: Mutex<usize> = Mutex::new(0);
+    static CANCEL_STATE_MATCHES: AtomicI32 = AtomicI32::new(1);
+
+    unsafe extern "C" fn progress_recorder(_za: *mut c_void, progress: f64, ud: *mut c_void) {
+        PROGRESS_SAMPLES.lock().unwrap().push(progress);
+        let expected = *PROGRESS_STATE.lock().unwrap();
+        if expected != 0 && ud as usize != expected {
+            PROGRESS_STATE_MATCHES.store(0, Ordering::Relaxed);
+        }
+    }
+
+    unsafe extern "C" fn cancel_reader(_za: *mut c_void, ud: *mut c_void) -> c_int {
+        CANCEL_CALLS.fetch_add(1, Ordering::Relaxed);
+        let expected = *CANCEL_STATE.lock().unwrap();
+        if expected != 0 && ud as usize != expected {
+            CANCEL_STATE_MATCHES.store(0, Ordering::Relaxed);
+        }
+        CANCEL_FLAG.load(Ordering::Relaxed)
+    }
+
+    /// Add a buffer source with `data` as an entry named `name` to archive `zh`.
+    unsafe fn add_buffer_entry(zh: H, name: &str, data: &[u8]) -> i64 {
+        let cname = CString::new(name).unwrap();
+        let src = unsafe {
+            zip_source_buffer(
+                zh,
+                data.as_ptr() as *const c_void,
+                data.len() as u64,
+                0,
+            )
+        };
+        assert!(!src.is_null(), "zip_source_buffer failed");
+        let idx = unsafe { zip_file_add(zh, cname.as_ptr(), src, 0) };
+        assert!(idx >= 0, "zip_file_add failed");
+        unsafe { zip_source_free(src) };
+        idx
+    }
+
+    /// Open a fresh write archive at `path` (create + truncate).
+    unsafe fn open_write_archive(path: &std::path::Path) -> H {
+        let cpath = CString::new(path.to_string_lossy().as_bytes()).unwrap();
+        let zh = unsafe {
+            zip_open(cpath.as_ptr(), ZIP_CREATE | ZIP_TRUNCATE, std::ptr::null_mut())
+        };
+        assert!(!zh.is_null(), "zip_open(create) failed");
+        zh
+    }
+
+    /// TC-1: progress callback fires monotonically; final reaches 1.0.
+    #[test]
+    fn progress_callback_monotonic() {
+        let _guard = PHASE6_LOCK.lock().unwrap();
+        PROGRESS_SAMPLES.lock().unwrap().clear();
+        PROGRESS_STATE_MATCHES.store(1, Ordering::Relaxed);
+        let path = temp_path("phase6_prog");
+        std::fs::remove_file(&path).ok();
+        let zh = unsafe { open_write_archive(&path) };
+
+        let ud: usize = 0xCAFE_1234;
+        *PROGRESS_STATE.lock().unwrap() = ud as usize;
+        let r = unsafe {
+            zip_register_progress_callback_with_state(
+                zh,
+                0.0,
+                Some(progress_recorder),
+                None,
+                ud as *mut c_void,
+            )
+        };
+        assert_eq!(r, 0);
+
+        unsafe { add_buffer_entry(zh, "a.txt", &b"progressable content ".repeat(40)) };
+        unsafe { add_buffer_entry(zh, "b.bin", &vec![7u8; 3000]) };
+        unsafe { add_buffer_entry(zh, "c.bin", &vec![0xA5u8; 8192]) };
+
+        assert_eq!(unsafe { zip_close(zh) }, 0);
+        assert!(path.exists(), "archive should have been written");
+
+        let samples = PROGRESS_SAMPLES.lock().unwrap().clone();
+        assert!(!samples.is_empty(), "progress callback must fire");
+        let mut last = -1.0f64;
+        for (i, &s) in samples.iter().enumerate() {
+            assert!(s >= last, "sample {i}: progress {s} < previous {last}");
+            assert!((0.0..=1.0).contains(&s), "sample {i}: {s} out of [0,1]");
+            last = s;
+        }
+        assert_eq!(
+            *samples.last().unwrap(),
+            1.0,
+            "final progress callback must reach 1.0"
+        );
+        assert_eq!(
+            PROGRESS_STATE_MATCHES.load(Ordering::Relaxed),
+            1,
+            "progress callback must receive the correct state pointer"
+        );
+
+        *PROGRESS_STATE.lock().unwrap() = 0;
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// TC-2: a cancel callback returning non-zero aborts the write; no partial
+    /// output is committed.
+    #[test]
+    fn cancel_callback_aborts() {
+        let _guard = PHASE6_LOCK.lock().unwrap();
+        CANCEL_FLAG.store(1, Ordering::Relaxed);
+        CANCEL_CALLS.store(0, Ordering::Relaxed);
+        let path = temp_path("phase6_cancel");
+        std::fs::remove_file(&path).ok();
+        let zh = unsafe { open_write_archive(&path) };
+
+        let r = unsafe {
+            zip_register_cancel_callback_with_state(
+                zh,
+                Some(cancel_reader),
+                None,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(r, 0);
+
+        unsafe { add_buffer_entry(zh, "a.txt", &b"cancel me please ".repeat(50)) };
+        unsafe { add_buffer_entry(zh, "b.bin", &vec![0u8; 4096]) };
+
+        assert_eq!(unsafe { zip_close(zh) }, -1, "cancel must fail zip_close");
+        assert!(
+            !path.exists(),
+            "cancelled write must not commit partial/corrupt output"
+        );
+        assert!(
+            CANCEL_CALLS.load(Ordering::Relaxed) >= 1,
+            "cancel callback must have been invoked"
+        );
+
+        // A cancel callback returning 0 must NOT abort; the write completes.
+        CANCEL_FLAG.store(0, Ordering::Relaxed);
+        CANCEL_CALLS.store(0, Ordering::Relaxed);
+        let path2 = temp_path("phase6_cancel_ok");
+        std::fs::remove_file(&path2).ok();
+        let zh2 = unsafe { open_write_archive(&path2) };
+        unsafe {
+            zip_register_cancel_callback_with_state(
+                zh2,
+                Some(cancel_reader),
+                None,
+                std::ptr::null_mut(),
+            )
+        };
+        unsafe { add_buffer_entry(zh2, "ok.txt", b"not cancelled") };
+        assert_eq!(unsafe { zip_close(zh2) }, 0, "returning 0 must not abort");
+        assert!(path2.exists(), "non-cancelling write must commit output");
+        assert!(CANCEL_CALLS.load(Ordering::Relaxed) >= 1);
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(&path2).ok();
+    }
+
+    /// TC-3: `_with_state` callbacks receive the correct state pointer; the
+    /// plain `zip_register_progress_callback` variant also works.
+    #[test]
+    fn callback_state_pointer() {
+        let _guard = PHASE6_LOCK.lock().unwrap();
+        PROGRESS_STATE_MATCHES.store(1, Ordering::Relaxed);
+        CANCEL_STATE_MATCHES.store(1, Ordering::Relaxed);
+        let path = temp_path("phase6_state");
+        std::fs::remove_file(&path).ok();
+        let zh = unsafe { open_write_archive(&path) };
+
+        let prog_ud: usize = 0xDEAD_BEEF;
+        *PROGRESS_STATE.lock().unwrap() = prog_ud as usize;
+        let cancel_ud: usize = 0x0BAD_F00D;
+        *CANCEL_STATE.lock().unwrap() = cancel_ud as usize;
+        CANCEL_FLAG.store(0, Ordering::Relaxed); // do not cancel
+
+        unsafe {
+            zip_register_progress_callback_with_state(
+                zh,
+                0.0,
+                Some(progress_recorder),
+                None,
+                prog_ud as *mut c_void,
+            )
+        };
+        unsafe {
+            zip_register_cancel_callback_with_state(
+                zh,
+                Some(cancel_reader),
+                None,
+                cancel_ud as *mut c_void,
+            )
+        };
+
+        unsafe { add_buffer_entry(zh, "p.txt", b"state pointer check payload") };
+        assert_eq!(unsafe { zip_close(zh) }, 0);
+
+        assert_eq!(
+            PROGRESS_STATE_MATCHES.load(Ordering::Relaxed),
+            1,
+            "progress callback got wrong state pointer"
+        );
+        assert_eq!(
+            CANCEL_STATE_MATCHES.load(Ordering::Relaxed),
+            1,
+            "cancel callback got wrong state pointer"
+        );
+
+        // Plain (non-_with_state) `zip_register_progress_callback` must work
+        // without a user-state pointer.
+        PROGRESS_SAMPLES.lock().unwrap().clear();
+        let path2 = temp_path("phase6_state_plain");
+        std::fs::remove_file(&path2).ok();
+        let zh2 = unsafe { open_write_archive(&path2) };
+        unsafe extern "C" fn plain_progress(_progress: f64) {
+            PROGRESS_SAMPLES.lock().unwrap().push(_progress);
+        }
+        unsafe { zip_register_progress_callback(zh2, Some(plain_progress)) };
+        unsafe { add_buffer_entry(zh2, "q.txt", b"plain progress callback") };
+        assert_eq!(unsafe { zip_close(zh2) }, 0);
+        let samples = PROGRESS_SAMPLES.lock().unwrap().clone();
+        assert!(!samples.is_empty(), "plain progress callback must fire");
+
+        *PROGRESS_STATE.lock().unwrap() = 0;
+        *CANCEL_STATE.lock().unwrap() = 0;
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(&path2).ok();
+    }
+
+    /// TC-4: output is byte-identical with vs without callbacks registered.
+    #[test]
+    fn output_deterministic_with_callbacks() {
+        let _guard = PHASE6_LOCK.lock().unwrap();
+        let files = [
+            ("a.txt", b"deterministic content alpha ".repeat(40)),
+            ("b.bin", vec![0x42u8; 2048]),
+            ("c.txt", b"deterministic content beta ".repeat(120)),
+        ];
+
+        let path_base = temp_path("phase6_det_base");
+        let path_cb = temp_path("phase6_det_cb");
+        std::fs::remove_file(&path_base).ok();
+        std::fs::remove_file(&path_cb).ok();
+
+        // Without callbacks.
+        let zh0 = unsafe { open_write_archive(&path_base) };
+        for (name, data) in &files {
+            unsafe { add_buffer_entry(zh0, name, data) };
+        }
+        assert_eq!(unsafe { zip_close(zh0) }, 0);
+
+        // With a non-cancelling progress + cancel callback.
+        PROGRESS_SAMPLES.lock().unwrap().clear();
+        CANCEL_FLAG.store(0, Ordering::Relaxed);
+        let zh1 = unsafe { open_write_archive(&path_cb) };
+        unsafe {
+            zip_register_progress_callback_with_state(
+                zh1,
+                0.0,
+                Some(progress_recorder),
+                None,
+                std::ptr::null_mut(),
+            )
+        };
+        unsafe {
+            zip_register_cancel_callback_with_state(
+                zh1,
+                Some(cancel_reader),
+                None,
+                std::ptr::null_mut(),
+            )
+        };
+        for (name, data) in &files {
+            unsafe { add_buffer_entry(zh1, name, data) };
+        }
+        assert_eq!(unsafe { zip_close(zh1) }, 0);
+
+        let base = std::fs::read(&path_base).unwrap();
+        let cb = std::fs::read(&path_cb).unwrap();
+        assert_eq!(
+            base, cb,
+            "output must be byte-identical with vs without callbacks"
+        );
+
+        std::fs::remove_file(&path_base).ok();
+        std::fs::remove_file(&path_cb).ok();
+    }
+
+    /// TC-5 (zip-sys portion): registering NULL callbacks and a cancel callback
+    /// that always returns a garbage non-zero value must not panic and must
+    /// yield a defined error.
+    #[test]
+    fn callbacks_malformed_no_panic() {
+        let _guard = PHASE6_LOCK.lock().unwrap();
+        let path = temp_path("phase6_malformed");
+        std::fs::remove_file(&path).ok();
+        let zh = unsafe { open_write_archive(&path) };
+
+        // Registering NULL/None callbacks must be a no-op success.
+        assert_eq!(
+            unsafe {
+                zip_register_progress_callback_with_state(
+                    zh,
+                    0.0,
+                    None,
+                    None,
+                    std::ptr::null_mut(),
+                )
+            },
+            0
+        );
+        assert_eq!(
+            unsafe {
+                zip_register_cancel_callback_with_state(
+                    zh,
+                    None,
+                    None,
+                    std::ptr::null_mut(),
+                )
+            },
+            0
+        );
+
+        // A cancel callback returning a garbage non-zero on every poll aborts
+        // with a defined error (no panic) and no output committed.
+        unsafe extern "C" fn garbage_cancel(_za: *mut c_void, _ud: *mut c_void) -> c_int {
+            0x7FFFFFFF
+        }
+        unsafe {
+            zip_register_cancel_callback_with_state(
+                zh,
+                Some(garbage_cancel),
+                None,
+                std::ptr::null_mut(),
+            )
+        };
+        unsafe { add_buffer_entry(zh, "x.bin", &vec![1u8; 512]) };
+        assert_eq!(unsafe { zip_close(zh) }, -1, "garbage cancel must abort");
+        assert!(!path.exists(), "cancelled write must not commit output");
+
+        std::fs::remove_file(&path).ok();
     }
 }
