@@ -93,6 +93,11 @@ pub enum ZipErrorCode {
     TruncatedZip = 35,
     /// Extra field is too large.
     Eftoolarge = 36,
+    /// Decompressed output exceeded the configured decompression limit
+    /// (zip-bomb guard).
+    DecompressionLimit = 37,
+    /// Central directory is too large to allocate (zip-bomb guard).
+    CentralDirTooLarge = 38,
 }
 
 impl ZipErrorCode {
@@ -143,6 +148,8 @@ impl ZipErrorCode {
             34 => Zipdestroyed,
             35 => TruncatedZip,
             36 => Eftoolarge,
+            37 => DecompressionLimit,
+            38 => CentralDirTooLarge,
             _ => Internal,
         }
     }
@@ -224,7 +231,7 @@ mod tests {
 
     #[test]
     fn roundtrip_all_codes() {
-        for i in 0..=36 {
+        for i in 0..=38 {
             let c = ZipErrorCode::from_i32(i);
             assert_eq!(c.as_i32(), i, "mismatch at {i}");
         }

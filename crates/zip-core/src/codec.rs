@@ -6,7 +6,7 @@
 //! source limited to the entry's `comp_size` so it never spills into the data
 //! descriptor or the next member.
 
-use crate::constant::CompressionMethod;
+use crate::constant::{CompressionMethod, MAX_DECOMPRESSED};
 use crate::error::{Result, ZipError, ZipErrorCode};
 use crate::source::Source;
 use std::io::{self, BufReader, Read};
@@ -78,22 +78,32 @@ pub fn decode_slice_into(
 ) -> Result<()> {
     out.clear();
     let bounded = &data[..(comp_size as usize).min(data.len())];
-    match method {
+    // Zip-bomb guard: cap the actual decompressed output. `take(limit)` stops
+    // the decoder after `limit` bytes, so a malicious small stream cannot
+    // expand without bound. `limit` is one byte past the cap so we can detect
+    // an over-limit stream (copied == limit) and reject it.
+    let limit = MAX_DECOMPRESSED + 1;
+    let copied = match method {
         CompressionMethod::Store => {
-            std::io::copy(&mut bounded.take(comp_size), out).map_err(io_to_zip)?;
+            std::io::copy(&mut bounded.take(comp_size).take(limit), out).map_err(io_to_zip)?
         }
         CompressionMethod::Deflate => {
-            let mut dec =
-                flate2::bufread::DeflateDecoder::new(BufReader::new(bounded.take(comp_size)));
-            std::io::copy(&mut dec, out).map_err(io_to_zip)?;
+            let dec = flate2::bufread::DeflateDecoder::new(BufReader::new(bounded.take(comp_size)));
+            std::io::copy(&mut dec.take(limit), out).map_err(io_to_zip)?
         }
         CompressionMethod::Bzip2 => {
-            let mut dec = bzip2_rs::DecoderReader::new(bounded.take(comp_size));
-            std::io::copy(&mut dec, out).map_err(io_to_zip)?;
+            let dec = bzip2_rs::DecoderReader::new(bounded.take(comp_size));
+            std::io::copy(&mut dec.take(limit), out).map_err(io_to_zip)?
         }
         CompressionMethod::Unsupported(_) => {
             return Err(ZipError::new(ZipErrorCode::Compnotsupp));
         }
+    };
+    if copied > MAX_DECOMPRESSED {
+        // Trim the buffer back to the cap so it never holds more than the
+        // allowed decompressed size, then reject the stream.
+        out.truncate(MAX_DECOMPRESSED as usize);
+        return Err(ZipError::new(ZipErrorCode::DecompressionLimit));
     }
     Ok(())
 }
@@ -174,5 +184,46 @@ mod tests {
         let err = decode_slice_into(&[0u8; 4], CompressionMethod::Unsupported(99), 4, &mut out)
             .unwrap_err();
         assert_eq!(err.code(), ZipErrorCode::Compnotsupp);
+    }
+
+    /// A small deflate stream that expands beyond the decompression cap must be
+    /// rejected with `DecompressionLimit` (zip-bomb guard), and the output
+    /// buffer must not grow past the cap.
+    #[test]
+    fn decode_slice_rejects_expansion_beyond_cap() {
+        // Highly compressible payload that decompresses to just over the cap.
+        let payload = vec![0u8; (MAX_DECOMPRESSED + 1) as usize];
+        let comp = deflate(&payload);
+        // Sanity: the compressed stream is tiny relative to the cap.
+        assert!((comp.len() as u64) < MAX_DECOMPRESSED / 100);
+
+        let mut out = Vec::new();
+        let err = decode_slice_into(
+            &comp,
+            CompressionMethod::Deflate,
+            comp.len() as u64,
+            &mut out,
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), ZipErrorCode::DecompressionLimit);
+        // The output must not have been allowed to grow past the cap.
+        assert!(out.len() as u64 <= MAX_DECOMPRESSED);
+    }
+
+    /// A deflate stream that decompresses to exactly the cap is still accepted
+    /// (legitimate inputs are not broken).
+    #[test]
+    fn decode_slice_accepts_exactly_at_cap() {
+        let payload = vec![0u8; MAX_DECOMPRESSED as usize];
+        let comp = deflate(&payload);
+        let mut out = Vec::new();
+        decode_slice_into(
+            &comp,
+            CompressionMethod::Deflate,
+            comp.len() as u64,
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(out.len() as u64, MAX_DECOMPRESSED);
     }
 }

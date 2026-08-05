@@ -47,6 +47,20 @@ pub const BUFFER_SIZE: usize = 8192;
 /// usage proportional to the read chunk rather than the whole entry.
 pub const ZERO_COPY_MAX_UNCOMP: u64 = 32 * 1024 * 1024;
 
+/// Maximum decompressed bytes produced by the zero-copy decode path
+/// ([`crate::codec::decode_slice_into`]). Matches `ZERO_COPY_MAX_UNCOMP` so
+/// legitimate zero-copy entries (whose claimed size is bounded by that
+/// constant) are never rejected, while a malicious small deflate stream
+/// cannot expand without bound (zip-bomb guard).
+pub const MAX_DECOMPRESSED: u64 = ZERO_COPY_MAX_UNCOMP;
+
+/// Maximum central-directory size (bytes) we will allocate when reading an
+/// archive's central directory. Prevents an EOCD/ZIP64 record claiming an
+/// absurd `cdir_size` (e.g. `u32::MAX` ≈ 4 GiB) from triggering an unbounded
+/// allocation / OOM (zip-bomb guard). Generous enough for all realistic
+/// legitimate archives (the largest corpus central directory is ~4 MiB).
+pub const MAX_CD_SIZE: u64 = 1 << 30;
+
 /// Number of buffers the archive's [`crate::BufferPool`] will hold for reuse
 /// across `open_entry` calls.
 pub const BUFFER_POOL_CAPACITY: usize = 8;

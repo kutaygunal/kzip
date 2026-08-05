@@ -4,7 +4,7 @@
 //! the archive for the EOCD record (tolerating trailing data), honor the ZIP64
 //! EOCD, then read and validate the central directory entries.
 
-use crate::constant::{magic, size, MAX_CD_BUFFER};
+use crate::constant::{magic, size, MAX_CD_BUFFER, MAX_CD_SIZE};
 use crate::dirent::Dirent;
 use crate::error::{Result, ZipError, ZipErrorCode};
 use crate::reader;
@@ -214,6 +214,12 @@ fn read_entries(
     cdir_size: u64,
     num_entries: u64,
 ) -> Result<Vec<Dirent>> {
+    // Zip-bomb guard: reject an absurd central-directory size before
+    // allocating, so an EOCD/ZIP64 record claiming e.g. `u32::MAX` (~4 GiB)
+    // cannot trigger an unbounded allocation / OOM.
+    if cdir_size > MAX_CD_SIZE {
+        return Err(ZipError::new(ZipErrorCode::CentralDirTooLarge));
+    }
     src.seek(SeekFrom::Start(offset))
         .map_err(|e| ZipError::with_system(ZipErrorCode::Seek, e))?;
     let mut buf = vec![0u8; cdir_size as usize];
@@ -364,6 +370,38 @@ mod tests {
         assert_eq!(
             read_central_dir(&mut src).unwrap_err().code(),
             ZipErrorCode::TruncatedZip
+        );
+    }
+
+    /// `read_entries` must reject an absurd `cdir_size` (e.g. `u32::MAX` ≈
+    /// 4 GiB) with `CentralDirTooLarge` *before* allocating, so a malicious
+    /// EOCD cannot trigger an OOM.
+    #[test]
+    fn read_entries_rejects_absurd_cdir_size() {
+        let mut src: Box<dyn Source> = Box::new(Cursor::new(vec![0u8; 16]));
+        let err = read_entries(&mut src, 0, u32::MAX as u64, 1).unwrap_err();
+        assert_eq!(err.code(), ZipErrorCode::CentralDirTooLarge);
+    }
+
+    /// End-to-end: an archive whose EOCD claims `cdir_size = u32::MAX` is
+    /// rejected with `CentralDirTooLarge` without allocating gigabytes.
+    #[test]
+    fn eocd_claiming_huge_cdir_size_is_rejected() {
+        // 4 bytes of junk + a 22-byte EOCD claiming cdir_size = u32::MAX.
+        let mut bytes = vec![0u8; 4];
+        bytes.extend_from_slice(&magic::EOCD);
+        bytes.extend_from_slice(&0u16.to_le_bytes()); // this_disk
+        bytes.extend_from_slice(&0u16.to_le_bytes()); // eocd_disk
+        bytes.extend_from_slice(&1u16.to_le_bytes()); // disk_entries
+        bytes.extend_from_slice(&1u16.to_le_bytes()); // num_entries
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes()); // cdir_size
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // cdir_offset
+        bytes.extend_from_slice(&0u16.to_le_bytes()); // comment_len
+
+        let mut src: Box<dyn Source> = Box::new(Cursor::new(bytes));
+        assert_eq!(
+            read_central_dir(&mut src).unwrap_err().code(),
+            ZipErrorCode::CentralDirTooLarge
         );
     }
 }
