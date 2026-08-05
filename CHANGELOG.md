@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — licensing
+
+- **License corrected to BSD-3-Clause** (matching the rest of the repo, which
+  already declared BSD-3-Clause in `README.md`, `docs/index.md`, `zip-core`
+  docs, `fuzz/Cargo.toml`, and `deny.toml`).
+  - `LICENSE` is now the BSD-3-Clause text with **both** copyrights preserved:
+    libzip's original `Copyright (C) 1999-2025 Dieter Baron and Thomas Klausner`
+    (required because the Rust port is derived from the BSD-3-Clause libzip
+    project) plus the Rust port author's own `Copyright (C) 2026 Kutay Gunal`.
+  - Root `Cargo.toml` `license` set to `"BSD-3-Clause"` (all crates inherit via
+    `license.workspace = true`).
+
 ### Added — Phase 5 (commercial readiness)
 
 - **Performance acceptance harness:**
