@@ -30,11 +30,7 @@ use std::path::Path;
 ///
 /// Returns [`ZipErrorCode::Incons`] if the central directory region is out of
 /// bounds, so a malformed input can never produce a corrupt archive.
-pub fn modify_archive(
-    bytes: &[u8],
-    renames: &[(u64, String)],
-    deletes: &[u64],
-) -> Result<Vec<u8>> {
+pub fn modify_archive(bytes: &[u8], renames: &[(u64, String)], deletes: &[u64]) -> Result<Vec<u8>> {
     // Parse the central directory of the in-memory archive via a seekable
     // Cursor (reuses the existing central-directory reader).
     let mut src: Box<dyn Source> = Box::new(Cursor::new(bytes.to_vec()));
@@ -128,11 +124,7 @@ pub fn modify_archive(
 ///
 /// ZIP64 archives are supported: the serializer re-emits the ZIP64 EOCD +
 /// locator and per-entry ZIP64 extra fields as needed.
-pub fn modify_archive_file(
-    path: &Path,
-    renames: &[(u64, String)],
-    deletes: &[u64],
-) -> Result<u64> {
+pub fn modify_archive_file(path: &Path, renames: &[(u64, String)], deletes: &[u64]) -> Result<u64> {
     // Open the existing file read+write. If this fails (missing file, missing
     // permission) nothing is modified.
     let mut file = std::fs::OpenOptions::new()
@@ -161,7 +153,8 @@ pub fn modify_archive_file(
         .len();
     if cd.cdir_offset > file_len
         || cd.cdir_size > file_len
-        || cd.cdir_offset
+        || cd
+            .cdir_offset
             .checked_add(cd.cdir_size)
             .map_or(true, |end| end > file_len)
     {
@@ -388,7 +381,11 @@ mod tests {
             new_len, expected_len,
             "returned length should equal data end + new CD + EOCD"
         );
-        assert_eq!(bytes.len() as u64, new_len, "on-disk file length should match");
+        assert_eq!(
+            bytes.len() as u64,
+            new_len,
+            "on-disk file length should match"
+        );
 
         // EOCD entry count = original count - real deletions (1).
         assert_eq!(cd.entries.len(), orig_count - 1);
@@ -476,12 +473,12 @@ mod tests {
         bytes.extend_from_slice(&(cd.entries.len() as u64).to_le_bytes()); // total entries
         bytes.extend_from_slice(&cdir_size.to_le_bytes()); // cdir size
         bytes.extend_from_slice(&cdir_offset.to_le_bytes()); // cdir offset
-        // ZIP64 EOCD locator (20 bytes).
+                                                             // ZIP64 EOCD locator (20 bytes).
         bytes.extend_from_slice(&magic::EOCD64_LOCATOR);
         bytes.extend_from_slice(&0u32.to_le_bytes()); // disk with zip64 eocd
         bytes.extend_from_slice(&(cdir_offset + cdir_size).to_le_bytes());
         bytes.extend_from_slice(&1u32.to_le_bytes()); // total disks
-        // Regular 32-bit EOCD with zip64 sentinel counts.
+                                                      // Regular 32-bit EOCD with zip64 sentinel counts.
         bytes.extend_from_slice(&magic::EOCD);
         bytes.extend_from_slice(&0u16.to_le_bytes());
         bytes.extend_from_slice(&0u16.to_le_bytes());
@@ -506,12 +503,7 @@ mod tests {
         let data_end = orig.cdir_offset as usize;
 
         // Rename index 0, delete index 1.
-        let out = modify_archive(
-            &bytes,
-            &[(0, "renamed_a.txt".to_string())],
-            &[1],
-        )
-        .unwrap();
+        let out = modify_archive(&bytes, &[(0, "renamed_a.txt".to_string())], &[1]).unwrap();
 
         // Output must still parse as ZIP64.
         let mut s2: Box<dyn Source> = Box::new(Cursor::new(out.clone()));
@@ -565,10 +557,8 @@ mod tests {
                 // Central record fixed layout (relative to the 4-byte magic):
                 // filename_len at [28..30], extra_len at [30..32], offset at
                 // [42..46]. Extra data follows the 46-byte fixed part + name.
-                let name_len =
-                    u16::from_le_bytes([ser[pos + 28], ser[pos + 29]]) as usize;
-                let extra_len =
-                    u16::from_le_bytes([ser[pos + 30], ser[pos + 31]]) as usize;
+                let name_len = u16::from_le_bytes([ser[pos + 28], ser[pos + 29]]) as usize;
+                let extra_len = u16::from_le_bytes([ser[pos + 30], ser[pos + 31]]) as usize;
                 let extra_start = pos + 46 + name_len;
                 let extra = &ser[extra_start..extra_start + extra_len];
                 let mut i = 0;
@@ -576,8 +566,7 @@ mod tests {
                     let id = u16::from_le_bytes([extra[i], extra[i + 1]]);
                     let len = u16::from_le_bytes([extra[i + 2], extra[i + 3]]) as usize;
                     if id == EXTRA_FIELD_ZIP64 && len >= 8 {
-                        let off =
-                            u64::from_le_bytes(extra[i + 4..i + 12].try_into().unwrap());
+                        let off = u64::from_le_bytes(extra[i + 4..i + 12].try_into().unwrap());
                         if off == big_offset {
                             found_zip64_ef = true;
                         }
@@ -593,8 +582,14 @@ mod tests {
                 pos += 1;
             }
         }
-        assert!(found_zip64_ef, "overflowing entry must carry a 0x0001 ZIP64 EF");
-        assert!(found_zip64_eocd, "serialized overflow must emit a ZIP64 EOCD");
+        assert!(
+            found_zip64_ef,
+            "overflowing entry must carry a 0x0001 ZIP64 EF"
+        );
+        assert!(
+            found_zip64_eocd,
+            "serialized overflow must emit a ZIP64 EOCD"
+        );
     }
 
     /// Helper: read an entry's contents or panic with a clear message.
@@ -632,10 +627,8 @@ mod tests {
         std::fs::remove_file(&path).ok();
 
         // Absent file: must error, and (trivially) no file is created.
-        let absent = std::env::temp_dir().join(format!(
-            "zipcore_modify_absent_{}.zip",
-            std::process::id()
-        ));
+        let absent =
+            std::env::temp_dir().join(format!("zipcore_modify_absent_{}.zip", std::process::id()));
         std::fs::remove_file(&absent).ok();
         let res = modify_archive_file(&absent, &[], &[]);
         assert!(res.is_err(), "absent file must be rejected");

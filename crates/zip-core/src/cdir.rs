@@ -57,8 +57,9 @@ impl CentralDir {
             || self.cdir_offset > u32::MAX as u64
             || self.entries.iter().any(|e| e.needs_zip64());
 
-        let mut out =
-            Vec::with_capacity(cdir_size as usize + size::EOCD + size::EOCD64 + size::EOCD64_LOCATOR);
+        let mut out = Vec::with_capacity(
+            cdir_size as usize + size::EOCD + size::EOCD64 + size::EOCD64_LOCATOR,
+        );
         out.extend_from_slice(&cdir);
 
         if need_zip64 {
@@ -504,6 +505,7 @@ mod tests {
 
     /// Build a small multi-entry archive (with per-entry extra fields and
     /// comments) and return `(full_bytes, cdir_offset, cdir_size)`.
+    #[allow(clippy::type_complexity)]
     fn build_corpus_archive() -> (Vec<u8>, u64, u64) {
         // (name, method, crc, csize, usize, extra_raw, comment)
         let entries: Vec<(&str, u16, u32, u32, u32, &[u8], &str)> = vec![

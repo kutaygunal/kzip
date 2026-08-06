@@ -101,10 +101,10 @@ pub trait Source: Read + Seek + Send + Sync {
 
     /// Create an independent copy of this source positioned at `offset`.
     ///
-    /// The default implementation calls [`duplicate`] (which positions the
+    /// The default implementation calls [`Self::duplicate`] (which positions the
     /// clone at the start) and then seeks to `offset`. Sources that can clone
     /// and seek in a single step (e.g. a `File`, where the wasted `seek(0)` in
-    /// [`duplicate`] is immediately overwritten by the caller) override this to
+    /// [`Self::duplicate`] is immediately overwritten by the caller) override this to
     /// avoid the redundant syscall on the per-entry read-open path.
     fn duplicate_at(&self, offset: u64) -> Result<Box<dyn Source>> {
         let mut d = self.duplicate()?;
@@ -261,7 +261,7 @@ impl Read for SharedFile {
         let mut state = self
             .inner
             .lock()
-            .map_err(|_| io::Error::new(io::ErrorKind::Other, "shared file lock poisoned"))?;
+            .map_err(|_| io::Error::other("shared file lock poisoned"))?;
         if state.last_pos != self.pos {
             state.file.seek(SeekFrom::Start(self.pos))?;
             state.last_pos = self.pos;
@@ -282,7 +282,7 @@ impl Seek for SharedFile {
                 let state = self
                     .inner
                     .lock()
-                    .map_err(|_| io::Error::new(io::ErrorKind::Other, "shared file lock poisoned"))?;
+                    .map_err(|_| io::Error::other("shared file lock poisoned"))?;
                 let len = state.file.metadata()?.len();
                 (len as i64 + d).max(0) as u64
             }

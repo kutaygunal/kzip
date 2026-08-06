@@ -44,8 +44,7 @@ impl Decoder {
                 // is unchanged. Correctness is unaffected: a smaller buffer
                 // merely means more underlying reads.
                 let cap = (comp_size as usize).clamp(1, 8192);
-                let dec =
-                    flate2::bufread::DeflateDecoder::new(BufReader::with_capacity(cap, take));
+                let dec = flate2::bufread::DeflateDecoder::new(BufReader::with_capacity(cap, take));
                 Ok(Decoder::Deflate(dec))
             }
             CompressionMethod::Bzip2 => Ok(Decoder::Bzip2(bzip2_rs::DecoderReader::new(take))),

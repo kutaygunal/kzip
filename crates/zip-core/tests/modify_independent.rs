@@ -5,8 +5,8 @@
 
 use std::io::{Cursor, Read};
 use zip_core::{
-    cdir::read_central_dir, write_archive, Archive, ArchiveFile, CompressOptions, Source,
-    modify_archive,
+    cdir::read_central_dir, modify_archive, write_archive, Archive, ArchiveFile, CompressOptions,
+    Source,
 };
 
 fn build(files: &[(String, Vec<u8>)]) -> Vec<u8> {
@@ -28,7 +28,9 @@ fn read_entry(bytes: &[u8], name: &str) -> Option<Vec<u8>> {
 
 fn data_region_end(bytes: &[u8]) -> usize {
     let mut src: Box<dyn Source> = Box::new(Cursor::new(bytes.to_vec()));
-    read_central_dir(&mut src).expect("read_central_dir").cdir_offset as usize
+    read_central_dir(&mut src)
+        .expect("read_central_dir")
+        .cdir_offset as usize
 }
 
 #[test]
@@ -37,7 +39,8 @@ fn m2_independent_functional_check() {
     let files: Vec<(String, Vec<u8>)> = (0..64)
         .map(|i| {
             let name = format!("f{i:02}.txt");
-            let content: Vec<u8> = format!("content-of-file-{i}-{}", "x".repeat(i as usize)).into_bytes();
+            let content: Vec<u8> =
+                format!("content-of-file-{i}-{}", "x".repeat(i as usize)).into_bytes();
             (name, content)
         })
         .collect();
@@ -46,7 +49,10 @@ fn m2_independent_functional_check() {
     let orig_data = &original[..orig_data_end].to_vec();
 
     // Snapshot original content of every entry (needed for byte-identical checks).
-    let orig_contents: Vec<Vec<u8>> = files.iter().map(|(n, _)| read_entry(&original, n).unwrap()).collect();
+    let orig_contents: Vec<Vec<u8>> = files
+        .iter()
+        .map(|(n, _)| read_entry(&original, n).unwrap())
+        .collect();
 
     // Renames at indices 5, 15, 25; deletes at indices 50, 40, 30, 20, 10.
     let renames = vec![
@@ -60,7 +66,11 @@ fn m2_independent_functional_check() {
 
     // 1) Data region bytes[0..cdir_offset] identical to original.
     let new_data_end = data_region_end(&out);
-    assert_eq!(&out[..new_data_end], orig_data.as_slice(), "data region differs");
+    assert_eq!(
+        &out[..new_data_end],
+        orig_data.as_slice(),
+        "data region differs"
+    );
 
     // 2) EOCD entry counts: 64 - 5 deletes = 59 entries.
     let mut src: Box<dyn Source> = Box::new(Cursor::new(out.clone()));
@@ -70,17 +80,23 @@ fn m2_independent_functional_check() {
     // 3) Renamed entries read under NEW names with correct content.
     for (idx, new_name) in &renames {
         let expect = &orig_contents[*idx as usize];
-        let got = read_entry(&out, new_name).expect(&format!("{new_name} missing"));
+        let got = read_entry(&out, new_name).unwrap_or_else(|| panic!("{new_name} missing"));
         assert_eq!(&got, expect, "content mismatch after rename for {new_name}");
         // Old name should be gone.
         let old_name = &files[*idx as usize].0;
-        assert!(read_entry(&out, old_name).is_none(), "old name {old_name} still present");
+        assert!(
+            read_entry(&out, old_name).is_none(),
+            "old name {old_name} still present"
+        );
     }
 
     // 4) Deleted entries absent.
     for d in &deletes {
         let name = &files[*d as usize].0;
-        assert!(read_entry(&out, name).is_none(), "deleted {name} still present");
+        assert!(
+            read_entry(&out, name).is_none(),
+            "deleted {name} still present"
+        );
     }
 
     // 5) Non-affected entries byte-identical, still present under same name.
@@ -91,7 +107,7 @@ fn m2_independent_functional_check() {
         }
         let name = &files[iu].0;
         let expect = &orig_contents[iu];
-        let got = read_entry(&out, name).expect(&format!("{name} unexpectedly missing"));
+        let got = read_entry(&out, name).unwrap_or_else(|| panic!("{name} unexpectedly missing"));
         assert_eq!(&got, expect, "non-affected entry {name} content changed");
     }
 

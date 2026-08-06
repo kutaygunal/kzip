@@ -29,7 +29,11 @@ const FILE_COUNT: usize = 64;
 /// for both C and Rust.
 fn fsync_file(path: &Path) {
     use std::fs::File;
-    let f = File::options().read(true).write(true).open(path).expect("open for fsync");
+    let f = File::options()
+        .read(true)
+        .write(true)
+        .open(path)
+        .expect("open for fsync");
     f.sync_all().expect("sync_all failed");
 }
 
@@ -114,15 +118,9 @@ fn main() {
     }
 
     // ---- Rust TRUE in-place modify (mirrors C) ----
-    fn rust_modify_inplace(
-        path: &Path,
-        renames: &[(u64, &str)],
-        deletes: &[u64],
-    ) -> f64 {
-        let renames_owned: Vec<(u64, String)> = renames
-            .iter()
-            .map(|(i, n)| (*i, n.to_string()))
-            .collect();
+    fn rust_modify_inplace(path: &Path, renames: &[(u64, &str)], deletes: &[u64]) -> f64 {
+        let renames_owned: Vec<(u64, String)> =
+            renames.iter().map(|(i, n)| (*i, n.to_string())).collect();
         let t = Instant::now();
         let _new_len = modify_archive_file(path, &renames_owned, deletes)
             .expect("rust in-place modify failed");

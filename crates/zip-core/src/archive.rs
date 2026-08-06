@@ -10,7 +10,9 @@
 use crate::bufferpool::BufferPool;
 use crate::cdir::read_central_dir;
 use crate::codec::decode_slice_into;
-use crate::constant::{CompressionMethod, BUFFER_POOL_CAPACITY, MAX_CD_SIZE, ZERO_COPY_FAST_MAX_UNCOMP};
+use crate::constant::{
+    CompressionMethod, BUFFER_POOL_CAPACITY, MAX_CD_SIZE, ZERO_COPY_FAST_MAX_UNCOMP,
+};
 use crate::crypto::{DecryptingSource, ZipCrypto, ENCRYPTION_HEADER_LEN};
 use crate::dirent::Dirent;
 use crate::error::{Result, ZipError, ZipErrorCode};
@@ -757,7 +759,10 @@ mod tests {
             ArchiveFile::new("b/two.bin", vec![0x5A; 4096]),
             ArchiveFile::new("c/three.txt", b"mmap compress me ".repeat(200)),
             // Oversized entry: forces the streaming fallback even on mmap.
-            ArchiveFile::new("d/big.bin", vec![0xCD; (ZERO_COPY_FAST_MAX_UNCOMP as usize) + 4096]),
+            ArchiveFile::new(
+                "d/big.bin",
+                vec![0xCD; (ZERO_COPY_FAST_MAX_UNCOMP as usize) + 4096],
+            ),
         ];
         let bytes = write_archive(&files, &CompressOptions::default()).unwrap();
 

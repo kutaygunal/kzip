@@ -244,7 +244,7 @@ impl Dirent {
     }
 
     /// Serialize this entry as a central-directory record, mirroring the
-    /// write path's [`crate::compress::write_central_entry`] but starting from
+    /// write path's `crate::compress::write_central_entry` but starting from
     /// a parsed [`Dirent`]. Every field is preserved verbatim (flags, method,
     /// times, crc, sizes, filename, extra fields, comment, disk, attributes,
     /// offset) so the output is byte-identical to the record this entry was
@@ -306,9 +306,12 @@ impl Dirent {
                 .cloned()
                 .collect();
             let mut raw = serialize_extra_fields(&filtered)?;
-            if let Some(z64) =
-                build_zip64_extra(self.comp_size, self.uncomp_size, self.offset, self.disk_number)
-            {
+            if let Some(z64) = build_zip64_extra(
+                self.comp_size,
+                self.uncomp_size,
+                self.offset,
+                self.disk_number,
+            ) {
                 raw.extend_from_slice(&z64);
             }
             raw
@@ -319,8 +322,8 @@ impl Dirent {
             u16::try_from(extra.len()).map_err(|_| ZipError::new(ZipErrorCode::Eftoolarge))?;
         let filename_len = u16::try_from(self.filename.len())
             .map_err(|_| ZipError::new(ZipErrorCode::Eftoolarge))?;
-        let comment_len =
-            u16::try_from(self.comment.len()).map_err(|_| ZipError::new(ZipErrorCode::Eftoolarge))?;
+        let comment_len = u16::try_from(self.comment.len())
+            .map_err(|_| ZipError::new(ZipErrorCode::Eftoolarge))?;
 
         let mut out = Vec::new();
         out.extend_from_slice(&magic::CENTRAL);
@@ -468,7 +471,7 @@ impl Dirent {
     /// filename and extra fields, returning the offset where the entry's data
     /// begins. This mirrors libzip's `_zip_dirent_size` (which reads only the
     /// fixed header) and avoids the per-entry heap allocations and extra-field
-    /// parsing that [`parse_local`] performs — the central directory already
+    /// parsing that `parse_local` performs — the central directory already
     /// carries the authoritative metadata, so the local header only needs to be
     /// skipped, not fully decoded.
     pub fn local_header_len(src: &mut (impl Read + Seek)) -> Result<u64> {
