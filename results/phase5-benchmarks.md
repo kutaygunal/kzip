@@ -27,7 +27,7 @@ numbers vs. those gates and states honestly which are met.
 | Implementation | Median throughput | Note |
 |----------------|-------------------|------|
 | C libzip 1.11.4 | **311.2 MiB/s** | native zlib, serial archive write |
-| Rust zip-core 0.1.0 | **262.8 MiB/s** | flate2/miniz_oxide, serial |
+| Rust zip-core 1.0.0 | **262.8 MiB/s** | flate2/miniz_oxide, serial |
 
 **Ratio: 262.8 / 311.2 = 0.844 → 84.4%** — **BELOW the 90% gate (not met).**
 

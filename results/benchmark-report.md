@@ -5,7 +5,7 @@ metadata, streaming sources, open-from-source, progress/cancel, archive flags,
 Win32 sources were added since the original 2026-08-04 report).
 **Workload machine:** local Windows, MSVC release builds, 24 logical CPUs, 31.7 GB RAM.
 **Reference library:** original C libzip `libs/c/zip.dll` **v1.11.4** (MSVC release, native zlib + bzip2), loaded in-process via `libloading`.
-**Rust implementation:** `zip-core` v0.1.0 (`flate2` / pure-Rust `miniz_oxide` DEFLATE), `cargo build --release` (`opt-level=3`, `lto="thin"`).
+**Rust implementation:** `zip-core` v1.0.0 (`flate2` / pure-Rust `miniz_oxide` DEFLATE), `cargo build --release` (`opt-level=3`, `lto="thin"`).
 
 ## Methodology (per PLAN §9.2)
 

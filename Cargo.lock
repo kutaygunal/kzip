@@ -313,7 +313,7 @@ dependencies = [
 
 [[package]]
 name = "differential"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "crc32fast",
  "flate2",
@@ -507,7 +507,7 @@ dependencies = [
 
 [[package]]
 name = "libzip-benches"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "criterion",
  "libc",
@@ -1062,7 +1062,7 @@ dependencies = [
 
 [[package]]
 name = "zip-async"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "tokio",
  "zip-core",
@@ -1070,7 +1070,7 @@ dependencies = [
 
 [[package]]
 name = "zip-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "aes",
  "bytes",
@@ -1090,7 +1090,7 @@ dependencies = [
 
 [[package]]
 name = "zip-sys"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "crc32fast",
  "flate2",
@@ -1102,7 +1102,7 @@ dependencies = [
 
 [[package]]
 name = "ziptools"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "winres",
  "zip-core",
