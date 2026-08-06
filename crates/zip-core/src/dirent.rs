@@ -231,6 +231,78 @@ impl Dirent {
         })
     }
 
+    /// Serialize this entry as a central-directory record, mirroring the
+    /// write path's [`crate::compress::write_central_entry`] but starting from
+    /// a parsed [`Dirent`]. Every field is preserved verbatim (flags, method,
+    /// times, crc, sizes, filename, extra fields, comment, disk, attributes,
+    /// offset) so the output is byte-identical to the record this entry was
+    /// parsed from. Fields that overflow their 32-bit representation
+    /// (`comp_size`, `uncomp_size`, `offset`) are written as the `0xFFFFFFFF`
+    /// sentinel exactly as the writer does.
+    pub fn to_central_record(&self) -> Result<Vec<u8>> {
+        let aes = crate::crypto::is_aes_method(self.encryption_method);
+        // On disk, a WinZip AES entry's method field is the special 99 value;
+        // the real method lives in the 0x9901 extra field (preserved verbatim).
+        let method = if aes {
+            ZIP_CM_WINZIP_AES
+        } else {
+            match self.comp_method {
+                CompressionMethod::Store => 0u16,
+                CompressionMethod::Deflate => 8u16,
+                CompressionMethod::Bzip2 => 12u16,
+                CompressionMethod::Unsupported(m) => m as u16,
+            }
+        };
+        let extra = serialize_extra_fields(&self.extra_fields)?;
+        let extra_len =
+            u16::try_from(extra.len()).map_err(|_| ZipError::new(ZipErrorCode::Eftoolarge))?;
+        let filename_len = u16::try_from(self.filename.len())
+            .map_err(|_| ZipError::new(ZipErrorCode::Eftoolarge))?;
+        let comment_len =
+            u16::try_from(self.comment.len()).map_err(|_| ZipError::new(ZipErrorCode::Eftoolarge))?;
+
+        // 0xFFFFFFFF sentinels for 32-bit-overflowed fields, matching the
+        // writer (ZIP64 extra-field reconstruction is a later phase).
+        let comp32 = if self.comp_size > u32::MAX as u64 {
+            ZIP64_MAGIC32
+        } else {
+            self.comp_size as u32
+        };
+        let uncomp32 = if self.uncomp_size > u32::MAX as u64 {
+            ZIP64_MAGIC32
+        } else {
+            self.uncomp_size as u32
+        };
+        let offset32 = if self.offset > u32::MAX as u64 {
+            ZIP64_MAGIC32
+        } else {
+            self.offset as u32
+        };
+
+        let mut out = Vec::new();
+        out.extend_from_slice(&magic::CENTRAL);
+        out.extend_from_slice(&self.version_madeby.to_le_bytes()); // version made by
+        out.extend_from_slice(&self.version_needed.to_le_bytes()); // version needed
+        out.extend_from_slice(&self.bitflags.to_le_bytes()); // bit flags
+        out.extend_from_slice(&method.to_le_bytes());
+        out.extend_from_slice(&self.last_mod_time.to_le_bytes()); // dos time
+        out.extend_from_slice(&self.last_mod_date.to_le_bytes()); // dos date
+        out.extend_from_slice(&self.crc.to_le_bytes());
+        out.extend_from_slice(&comp32.to_le_bytes());
+        out.extend_from_slice(&uncomp32.to_le_bytes());
+        out.extend_from_slice(&filename_len.to_le_bytes());
+        out.extend_from_slice(&extra_len.to_le_bytes()); // extra len
+        out.extend_from_slice(&comment_len.to_le_bytes()); // comment len
+        out.extend_from_slice(&(self.disk_number as u16).to_le_bytes()); // disk number
+        out.extend_from_slice(&self.int_attrib.to_le_bytes()); // internal attrs
+        out.extend_from_slice(&self.ext_attrib.to_le_bytes()); // external attrs
+        out.extend_from_slice(&offset32.to_le_bytes());
+        out.extend_from_slice(self.filename.as_bytes());
+        out.extend_from_slice(&extra);
+        out.extend_from_slice(self.comment.as_bytes());
+        Ok(out)
+    }
+
     /// Parse a local file header from a source positioned at its `PK\x03\x04`
     /// magic. Returns the entry plus the byte length of the fixed + filename +
     /// extra portion (i.e. where the data begins).

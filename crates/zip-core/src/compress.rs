@@ -648,15 +648,8 @@ fn write_eocd(
     comment: &[u8],
     out: &mut Vec<u8>,
 ) {
-    out.extend_from_slice(&magic::EOCD);
-    out.extend_from_slice(&0u16.to_le_bytes()); // this disk
-    out.extend_from_slice(&0u16.to_le_bytes()); // disk with cdir
-    out.extend_from_slice(&num_entries.to_le_bytes());
-    out.extend_from_slice(&num_entries.to_le_bytes());
-    out.extend_from_slice(&(cdir_size as u32).to_le_bytes());
-    out.extend_from_slice(&(cdir_offset as u32).to_le_bytes());
-    out.extend_from_slice(&(comment.len() as u16).to_le_bytes()); // comment len
-    out.extend_from_slice(comment);
+    // Delegated to the shared serializer so both paths emit identical EOCDs.
+    crate::cdir::write_eocd(num_entries, cdir_size, cdir_offset, comment, out);
 }
 
 // Silence unused-import warning when the flag module is only used by future

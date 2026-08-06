@@ -20,6 +20,62 @@ pub struct CentralDir {
     pub comment: String,
     /// Whether the central directory used the ZIP64 EOCD record.
     pub is_zip64: bool,
+    /// Byte length of the central-directory region (all entries), as recorded
+    /// by the EOCD (or ZIP64 EOCD when present).
+    pub cdir_size: u64,
+    /// Absolute offset of the central-directory region within the archive, as
+    /// recorded by the EOCD (or ZIP64 EOCD when present).
+    pub cdir_offset: u64,
+}
+
+impl CentralDir {
+    /// Serialize the central directory: every per-entry record (via
+    /// [`Dirent::to_central_record`]) followed by the EOCD record.
+    ///
+    /// The EOCD's `cdir_size` is the sum of the per-entry records and its
+    /// `cdir_offset` is this archive's recorded [`CentralDir::cdir_offset`]; the
+    /// entry count comes from `self.entries`. ZIP64 archives are not yet
+    /// supported by the writer (added in a later phase) and return an
+    /// "operation not supported" error.
+    pub fn serialize(&self) -> Result<Vec<u8>> {
+        if self.is_zip64 {
+            return Err(ZipError::new(ZipErrorCode::Opnotsupp));
+        }
+        let mut out = Vec::new();
+        for e in &self.entries {
+            out.extend_from_slice(&e.to_central_record()?);
+        }
+        let cdir_size = out.len() as u64;
+        write_eocd(
+            self.entries.len() as u16,
+            cdir_size,
+            self.cdir_offset,
+            self.comment.as_bytes(),
+            &mut out,
+        );
+        Ok(out)
+    }
+}
+
+/// Serialize an EOCD record into `out`. Shared with the compression write
+/// path ([`crate::compress`]) so the serializer and the writer produce
+/// identical EOCD records.
+pub(crate) fn write_eocd(
+    num_entries: u16,
+    cdir_size: u64,
+    cdir_offset: u64,
+    comment: &[u8],
+    out: &mut Vec<u8>,
+) {
+    out.extend_from_slice(&magic::EOCD);
+    out.extend_from_slice(&0u16.to_le_bytes()); // this disk
+    out.extend_from_slice(&0u16.to_le_bytes()); // disk with cdir
+    out.extend_from_slice(&num_entries.to_le_bytes());
+    out.extend_from_slice(&num_entries.to_le_bytes());
+    out.extend_from_slice(&(cdir_size as u32).to_le_bytes());
+    out.extend_from_slice(&(cdir_offset as u32).to_le_bytes());
+    out.extend_from_slice(&(comment.len() as u16).to_le_bytes()); // comment len
+    out.extend_from_slice(comment);
 }
 
 /// Read the central directory from a seekable source.
@@ -143,6 +199,8 @@ fn try_parse_cdir(
                     entries,
                     comment,
                     is_zip64,
+                    cdir_size: z.cdir_size,
+                    cdir_offset: z.cdir_offset,
                 }));
             }
         }
@@ -154,6 +212,8 @@ fn try_parse_cdir(
             entries: Vec::new(),
             comment,
             is_zip64,
+            cdir_size: 0,
+            cdir_offset: 0,
         }));
     }
 
@@ -162,6 +222,8 @@ fn try_parse_cdir(
         entries,
         comment,
         is_zip64,
+        cdir_size,
+        cdir_offset,
     }))
 }
 
@@ -261,7 +323,7 @@ fn source_len(src: &mut Box<dyn Source>) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constant::magic;
+    use crate::constant::{magic, size};
     use std::io::Cursor;
 
     /// Build a minimal single-file archive in memory and return its bytes.
@@ -370,6 +432,99 @@ mod tests {
         assert_eq!(
             read_central_dir(&mut src).unwrap_err().code(),
             ZipErrorCode::TruncatedZip
+        );
+    }
+
+    /// Build a small multi-entry archive (with per-entry extra fields and
+    /// comments) and return `(full_bytes, cdir_offset, cdir_size)`.
+    fn build_corpus_archive() -> (Vec<u8>, u64, u64) {
+        // (name, method, crc, csize, usize, extra_raw, comment)
+        let entries: Vec<(&str, u16, u32, u32, u32, &[u8], &str)> = vec![
+            (
+                "a/one.txt",
+                8,
+                0x11111111,
+                20,
+                100,
+                &[0x01, 0x00, 0x03, 0x00, 0xde, 0xad, 0xbe],
+                "entry comment",
+            ),
+            ("b/two.bin", 0, 0x22222222, 64, 64, &[], ""),
+        ];
+        let mut v = Vec::new();
+        let mut offsets = Vec::new();
+        // Local headers + data; record each entry's real offset.
+        for (name, method, crc, csize, usize32, _extra, _comment) in &entries {
+            offsets.push(v.len() as u32);
+            let nameb = name.as_bytes();
+            v.extend_from_slice(&magic::LOCAL);
+            v.extend_from_slice(&[20, 0, 0, 0]); // version_needed + flags
+            v.extend_from_slice(&method.to_le_bytes());
+            v.extend_from_slice(&[0u8; 4]); // time/date
+            v.extend_from_slice(&crc.to_le_bytes());
+            v.extend_from_slice(&csize.to_le_bytes());
+            v.extend_from_slice(&usize32.to_le_bytes());
+            v.extend_from_slice(&(nameb.len() as u16).to_le_bytes());
+            v.extend_from_slice(&0u16.to_le_bytes()); // extra len
+            v.extend_from_slice(nameb);
+            v.extend_from_slice(&vec![0u8; *csize as usize]);
+        }
+        let cdir_offset = v.len() as u64;
+        // Central directory entries (with extra + comment to exercise fidelity).
+        for (idx, (name, method, crc, csize, usize32, extra, comment)) in entries.iter().enumerate()
+        {
+            let nameb = name.as_bytes();
+            v.extend_from_slice(&magic::CENTRAL);
+            v.extend_from_slice(&[20, 0, 20, 0, 0, 0]); // madeby needed flags
+            v.extend_from_slice(&method.to_le_bytes());
+            v.extend_from_slice(&[0u8; 4]); // time/date
+            v.extend_from_slice(&crc.to_le_bytes());
+            v.extend_from_slice(&csize.to_le_bytes());
+            v.extend_from_slice(&usize32.to_le_bytes());
+            v.extend_from_slice(&(nameb.len() as u16).to_le_bytes());
+            v.extend_from_slice(&(extra.len() as u16).to_le_bytes());
+            v.extend_from_slice(&(comment.len() as u16).to_le_bytes());
+            v.extend_from_slice(&0u16.to_le_bytes()); // disk
+            v.extend_from_slice(&0u16.to_le_bytes()); // int attrib
+            v.extend_from_slice(&0u32.to_le_bytes()); // ext attrib
+            v.extend_from_slice(&offsets[idx].to_le_bytes());
+            v.extend_from_slice(nameb);
+            v.extend_from_slice(extra);
+            v.extend_from_slice(comment.as_bytes());
+        }
+        let cdir_size = (v.len() - cdir_offset as usize) as u64;
+        // EOCD.
+        v.extend_from_slice(&magic::EOCD);
+        v.extend_from_slice(&0u16.to_le_bytes()); // this disk
+        v.extend_from_slice(&0u16.to_le_bytes()); // disk with cdir
+        v.extend_from_slice(&(entries.len() as u16).to_le_bytes()); // disk entries
+        v.extend_from_slice(&(entries.len() as u16).to_le_bytes()); // num entries
+        v.extend_from_slice(&(cdir_size as u32).to_le_bytes());
+        v.extend_from_slice(&(cdir_offset as u32).to_le_bytes());
+        v.extend_from_slice(&0u16.to_le_bytes()); // comment len
+        (v, cdir_offset, cdir_size)
+    }
+
+    /// Round-trip the central directory through `Dirent::to_central_record` +
+    /// `CentralDir::serialize` and assert byte-identical to the original
+    /// central-directory region (flags, extra fields, ordering all preserved).
+    #[test]
+    fn dirent_serialize_roundtrip() {
+        let (bytes, cdir_offset, cdir_size) = build_corpus_archive();
+        let mut src: Box<dyn Source> = Box::new(Cursor::new(bytes.clone()));
+        let cd = read_central_dir(&mut src).unwrap();
+        assert_eq!(cd.cdir_offset, cdir_offset);
+        assert_eq!(cd.cdir_size, cdir_size);
+        assert_eq!(cd.entries.len(), 2);
+
+        let serialized = cd.serialize().unwrap();
+        // Serializer emits the per-entry records followed by the EOCD; the
+        // records region (first cdir_size bytes) must equal the original CD.
+        assert_eq!(serialized.len(), cdir_size as usize + size::EOCD);
+        let end = (cdir_offset + cdir_size) as usize;
+        assert_eq!(
+            &serialized[..cdir_size as usize],
+            &bytes[cdir_offset as usize..end]
         );
     }
 
