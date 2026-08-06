@@ -47,6 +47,21 @@ pub const BUFFER_SIZE: usize = 8192;
 /// usage proportional to the read chunk rather than the whole entry.
 pub const ZERO_COPY_MAX_UNCOMP: u64 = 32 * 1024 * 1024;
 
+/// Maximum uncompressed entry size (bytes) for which the zero-copy buffered
+/// read path is a net *win* (P4).
+///
+/// The zero-copy path decodes the whole entry into a pooled buffer and then
+/// serves from it, which adds one extra copy of the decompressed bytes. For
+/// tiny entries (the random-access workload, ~512 B..=4 KiB) that copy is
+/// negligible and the path is much faster than streaming (it avoids per-entry
+/// syscalls and the shared-handle mutex). For large entries (the full-read
+/// workload, >= 128 KiB) the extra copy dominates and streaming is faster.
+/// This threshold keeps the zero-copy path on the small entries where it wins
+/// and routes large entries to streaming, so the mmap-backed source (P4) does
+/// not regress `read_full`. `ZERO_COPY_MAX_UNCOMP` remains the hard upper
+/// bound / zip-bomb guard.
+pub const ZERO_COPY_FAST_MAX_UNCOMP: u64 = 64 * 1024;
+
 /// Maximum decompressed bytes produced by the zero-copy decode path
 /// ([`crate::codec::decode_slice_into`]). Matches `ZERO_COPY_MAX_UNCOMP` so
 /// legitimate zero-copy entries (whose claimed size is bounded by that

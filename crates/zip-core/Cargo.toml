@@ -23,6 +23,10 @@ ctr = "0.9"
 hmac = "0.12"
 sha1 = "0.10"
 pbkdf2 = "0.12"
+# Safe memory-mapping for zero-copy random access (P4). The `Mmap` type is
+# safe to use (all `unsafe` is encapsulated inside the crate); zip-core itself
+# remains `#![deny(unsafe_code)]`.
+memmap2 = "0.9"
 
 [features]
 default = ["parallel"]

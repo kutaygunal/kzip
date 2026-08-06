@@ -10,7 +10,7 @@
 use crate::bufferpool::BufferPool;
 use crate::cdir::read_central_dir;
 use crate::codec::decode_slice_into;
-use crate::constant::{CompressionMethod, BUFFER_POOL_CAPACITY, MAX_CD_SIZE, ZERO_COPY_MAX_UNCOMP};
+use crate::constant::{CompressionMethod, BUFFER_POOL_CAPACITY, MAX_CD_SIZE, ZERO_COPY_FAST_MAX_UNCOMP};
 use crate::crypto::{DecryptingSource, ZipCrypto, ENCRYPTION_HEADER_LEN};
 use crate::dirent::Dirent;
 use crate::error::{Result, ZipError, ZipErrorCode};
@@ -63,11 +63,18 @@ impl Archive {
     pub fn open<S: Source + 'static>(src: S) -> Result<Archive> {
         let mut boxed: Box<dyn Source> = Box::new(src);
         let cd = read_central_dir(&mut boxed)?;
-        // Grab a shared file handle (if this is a real file) so per-entry
-        // readers can share it instead of cloning the OS handle each time.
+        // P4: try to memory-map the source for zero-copy random access. If the
+        // mmap succeeds, the mmap-backed source serves both the zero-copy
+        // decode path (`as_slice`) and the streaming fallback, so the shared
+        // file handle (P1) is not needed and is dropped. If mmap fails (e.g.
+        // an empty file), we fall back to the shared-handle approach unchanged.
         let shared = boxed.shared_handle();
+        let (src, shared) = match boxed.try_mmap() {
+            Some(m) => (m, None),
+            None => (boxed, shared),
+        };
         Ok(Archive {
-            src: boxed,
+            src,
             entries: cd.entries,
             comment: cd.comment,
             is_zip64: cd.is_zip64,
@@ -262,11 +269,12 @@ impl Archive {
         // Zero-copy fast path: for contiguous, buffer-backed sources we decode
         // the whole entry directly from the borrowed `&[u8]` slice (no copy of
         // the compressed bytes) into a pooled buffer. We skip this for
-        // encrypted / unsupported entries and for very large entries, which
-        // stream to keep memory bounded.
+        // encrypted / unsupported entries and for entries above the fast-path
+        // size cap, which stream to keep memory bounded and avoid the extra
+        // copy that would slow down large (full-read) entries.
         if !encrypted
             && !matches!(method, CompressionMethod::Unsupported(_))
-            && uncomp_size <= ZERO_COPY_MAX_UNCOMP
+            && uncomp_size <= ZERO_COPY_FAST_MAX_UNCOMP
         {
             // Only buffer-backed sources expose `as_slice()`; for a real
             // `File` this is `None`, so we skip the tell syscall entirely.
@@ -720,11 +728,11 @@ mod tests {
         assert_eq!(a, b);
     }
 
-    /// The zero-copy cap is inclusive: an entry exactly at `ZERO_COPY_MAX_UNCOMP`
+    /// The zero-copy cap is inclusive: an entry exactly at `ZERO_COPY_FAST_MAX_UNCOMP`
     /// still uses the zero-copy path and must match streaming.
     #[test]
     fn zero_copy_cap_boundary_is_inclusive() {
-        let n = ZERO_COPY_MAX_UNCOMP as usize;
+        let n = ZERO_COPY_FAST_MAX_UNCOMP as usize;
         let bytes = store_archive(&[("boundary.bin", vec![0xAB; n])]);
         let zc = Archive::open(Cursor::new(bytes.clone())).unwrap();
         let st = Archive::open(NoSlice(Cursor::new(bytes))).unwrap();
@@ -736,12 +744,51 @@ mod tests {
         assert_eq!(a, b, "zero-copy at the size cap must match streaming");
     }
 
-    /// An entry above `ZERO_COPY_MAX_UNCOMP` must fall back to the streaming
+    /// P4: opening a real `File` memory-maps it, so the mmap-backed source's
+    /// `as_slice()` enables the zero-copy decode path. Every entry must read
+    /// byte-identically to the in-memory `Cursor` path, and the mmap path must
+    /// also match the streaming fallback for an oversized entry.
+    #[test]
+    fn mmap_file_path_matches_cursor_path() {
+        use std::io::Write;
+
+        let files = vec![
+            ArchiveFile::new("a/one.txt", b"mmap payload one ".repeat(64)),
+            ArchiveFile::new("b/two.bin", vec![0x5A; 4096]),
+            ArchiveFile::new("c/three.txt", b"mmap compress me ".repeat(200)),
+            // Oversized entry: forces the streaming fallback even on mmap.
+            ArchiveFile::new("d/big.bin", vec![0xCD; (ZERO_COPY_FAST_MAX_UNCOMP as usize) + 4096]),
+        ];
+        let bytes = write_archive(&files, &CompressOptions::default()).unwrap();
+
+        // In-memory (Cursor) reference path.
+        let ref_arch = Archive::open(Cursor::new(bytes.clone())).unwrap();
+
+        // On-disk (File) path: `Archive::open(File)` memory-maps the file.
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("zipcore_mmap_{}.zip", std::process::id()));
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(&bytes).unwrap();
+        drop(f);
+        let arch = Archive::open(std::fs::File::open(&path).unwrap()).unwrap();
+
+        for i in 0..files.len() as u64 {
+            let mut a = Vec::new();
+            ref_arch.open_entry(i).unwrap().read_to_end(&mut a).unwrap();
+            let mut b = Vec::new();
+            arch.open_entry(i).unwrap().read_to_end(&mut b).unwrap();
+            assert_eq!(a, b, "mmap and cursor disagree on entry {i}");
+            assert_eq!(a, files[i as usize].data, "entry {i} content corrupted");
+        }
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// An entry above `ZERO_COPY_FAST_MAX_UNCOMP` must fall back to the streaming
     /// decoder even on a contiguous (as_slice-capable) source, and still read
     /// every byte correctly.
     #[test]
     fn oversized_entry_uses_streaming_fallback_and_reads_fully() {
-        let n = ZERO_COPY_MAX_UNCOMP as usize + 4096;
+        let n = ZERO_COPY_FAST_MAX_UNCOMP as usize + 4096;
         let bytes = store_archive(&[("oversized.bin", vec![0xCD; n])]);
         let zc = Archive::open(Cursor::new(bytes)).unwrap();
         let mut a = Vec::new();

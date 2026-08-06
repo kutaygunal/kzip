@@ -124,6 +124,19 @@ pub trait Source: Read + Seek + Send + Sync {
     fn shared_handle(&self) -> Option<Arc<Mutex<SharedFileState>>> {
         None
     }
+
+    /// If this source is backed by a real file, return a new source that
+    /// memory-maps the file for zero-copy random access (P4).
+    ///
+    /// The returned source's [`Source::as_slice`] exposes the **entire** file
+    /// as a contiguous `&[u8]`, so the archive's zero-copy decode path can
+    /// decode each entry directly from the mapping (no per-entry handle clone,
+    /// no seek/read syscalls, no local-header reads once data offsets are
+    /// cached). The mapping is shared (via `Arc`) across per-entry duplicates.
+    /// Default: `None` (non-file sources, e.g. in-memory buffers).
+    fn try_mmap(&self) -> Option<Box<dyn Source>> {
+        None
+    }
 }
 
 impl Source for std::fs::File {
@@ -169,6 +182,30 @@ impl Source for std::fs::File {
             file,
             last_pos: u64::MAX,
         })))
+    }
+
+    fn try_mmap(&self) -> Option<Box<dyn Source>> {
+        // Memory-map the whole file. `Mmap::map` is the only way to create a
+        // mapping in memmap2 and is `unsafe` in every version; we encapsulate
+        // it here in a single, documented block (the crate's `deny(unsafe_code)`
+        // is relaxed only for this one call). It fails on an empty file, in
+        // which case we fall back to the shared-handle path.
+        //
+        // # Safety
+        //
+        // `Mmap::map` is sound when the returned mapping is not used after the
+        // underlying file is truncated or otherwise mutated in a way that
+        // invalidates the mapping. Here the file is opened read-only for the
+        // lifetime of the archive and is never modified while mapped; the
+        // mapping is read-only (no data race on writes) and is owned by the
+        // `Mmap` object, which is shared via `Arc` and lives exactly as long as
+        // the `MmapSource`/`Archive` that holds it. `as_slice` borrows from
+        // `&self`, so the returned `&[u8]` can never outlive the mapping. This
+        // is the same read-only, unmodified-file assumption libzip and other
+        // archive tools rely on.
+        #[allow(unsafe_code)]
+        let map = unsafe { memmap2::Mmap::map(self) }.ok()?;
+        Some(Box::new(MmapSource::new(Arc::new(map))))
     }
 }
 
@@ -272,6 +309,92 @@ impl Source for SharedFile {
         // Share the same handle; no OS handle clone. Positioned at `offset`.
         Ok(Box::new(SharedFile {
             inner: self.inner.clone(),
+            pos: offset,
+        }))
+    }
+}
+
+/// A `Source` backed by a read-only memory map of a file (P4).
+///
+/// The whole file is mapped once (at archive open) and shared across all
+/// per-entry readers via an `Arc`. [`Source::as_slice`] exposes the entire
+/// mapping as a contiguous `&[u8]`, so the archive's zero-copy decode path can
+/// decode each entry directly from the mapping — no per-entry OS handle clone,
+/// no seek/read syscalls, and no local-header reads once data offsets are
+/// cached (P3). Reads and seeks are pure in-memory operations over the slice.
+///
+/// This is the zero-copy counterpart to [`SharedFile`]: where `SharedFile`
+/// serializes reads on a shared OS handle (P1), `MmapSource` eliminates the
+/// syscalls entirely for the common random-access workload.
+pub struct MmapSource {
+    map: Arc<memmap2::Mmap>,
+    pos: u64,
+}
+
+impl std::fmt::Debug for MmapSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MmapSource")
+            .field("len", &self.map.len())
+            .field("pos", &self.pos)
+            .finish_non_exhaustive()
+    }
+}
+
+impl MmapSource {
+    /// Create a reader over a shared memory map, positioned at the start.
+    pub fn new(map: Arc<memmap2::Mmap>) -> Self {
+        MmapSource { map, pos: 0 }
+    }
+}
+
+impl Read for MmapSource {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let data = &self.map[..];
+        if self.pos as usize >= data.len() {
+            return Ok(0);
+        }
+        let start = self.pos as usize;
+        let end = (start + buf.len()).min(data.len());
+        let n = end - start;
+        buf[..n].copy_from_slice(&data[start..end]);
+        self.pos += n as u64;
+        Ok(n)
+    }
+}
+
+impl Seek for MmapSource {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        let new_pos = match pos {
+            SeekFrom::Start(p) => p,
+            SeekFrom::Current(d) => (self.pos as i64 + d).max(0) as u64,
+            SeekFrom::End(d) => (self.map.len() as i64 + d).max(0) as u64,
+        };
+        self.pos = new_pos;
+        Ok(new_pos)
+    }
+}
+
+impl Source for MmapSource {
+    fn supports(&self) -> Supports {
+        Supports::ReadableAndSeekable
+    }
+
+    fn as_slice(&self) -> Option<&[u8]> {
+        Some(&self.map[..])
+    }
+
+    fn duplicate(&self) -> Result<Box<dyn Source>> {
+        // Share the same mapping; no OS handle clone. Positioned at the start.
+        Ok(Box::new(MmapSource {
+            map: self.map.clone(),
+            pos: 0,
+        }))
+    }
+
+    fn duplicate_at(&self, offset: u64) -> Result<Box<dyn Source>> {
+        // Share the same mapping; no OS handle clone. Positioned at `offset`.
+        Ok(Box::new(MmapSource {
+            map: self.map.clone(),
             pos: offset,
         }))
     }
