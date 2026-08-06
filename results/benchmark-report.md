@@ -19,22 +19,24 @@ Win32 sources were added since the original 2026-08-04 report).
 
 ## Summary
 
-> **Update (2026):** The **read_random** workload was previously C-faster (0.79×). After the
-> read-path optimizations P0–P4 (lightweight header skip, shared file handle, smaller decode
-> buffer, cached data offsets, and an mmap-backed zero-copy source), read_random is now
-> **1.92× faster than C** (598.2 vs 310.9 MiB/s). All other rows were re-measured on the same
+> **Update (2026):** Two optimization series closed both previously-C-ahead workloads.
+> **read_random** (P0–P4: lightweight header skip, shared file handle, smaller decode
+> buffer, cached data offsets, mmap-backed zero-copy source) went from 0.79× to **~1.8×
+> faster than C**. **Modify in place** (M1–M4: central-directory serializer, byte-array and
+> file true-in-place rewrite that reuses compressed data) added a true in-place path that is
+> **~8× faster than C** (0.23 vs 1.91 ms). All other rows were re-measured on the same
 > machine and are stable/no-regression.
 
 | # | Workload | C libzip 1.11.4 | Rust zip-core 0.1.0 | Ratio (Rust/C) | Verdict |
 |---|----------|-----------------|---------------------|----------------|---------|
-| 1 | Compress small files (1–64 KiB, 3000 files) | 433.7 MiB/s | 647.1 MiB/s | **1.49×** | Rust **faster** |
-| 2 | Compress large single file (1 GiB) | 368.6 MiB/s | 861.7 MiB/s | **2.34×** | Rust **faster** |
-| 3a | Compress mixed corpus (96 files, serial) | 381.2 MiB/s | 843.2 MiB/s | **2.21×** | Rust **faster** |
-| 3b | Compress mixed corpus (Rust **parallel**, 24 workers) | — | 5896.3 MiB/s | 15.47× vs C | Rust **much faster** (parallel) |
-| 4 | Read / extract full archive (128 entries) | 2142.0 MiB/s | 4998.4 MiB/s | **2.33×** | Rust **faster** |
-| 5 | Read random entries (2000 of 10k) | 310.9 MiB/s | 598.2 MiB/s | **1.92×** | Rust **faster** |
-| 6 | Modify in place (add/delete/rename) | 9.55 ms | 9.69 ms | ~1.01× (wall) | **parity** (see note) |
-| 7 | Memory peak, 10k-entry archive | RSS Δ ≈ 0 MiB (limitation) | compress 10.1 MiB / read 0.0 MiB | — | Rust bounded; C RSS n/a |
+| 1 | Compress small files (1–64 KiB, 3000 files) | 441.7 MiB/s | 650.9 MiB/s | **1.47×** | Rust **faster** |
+| 2 | Compress large single file (1 GiB) | 369.6 MiB/s | 835.8 MiB/s | **2.26×** | Rust **faster** |
+| 3a | Compress mixed corpus (96 files, serial) | 372.9 MiB/s | 855.3 MiB/s | **2.29×** | Rust **faster** |
+| 3b | Compress mixed corpus (Rust **parallel**, 24 workers) | — | 6203.4 MiB/s | 16.63× vs C | Rust **much faster** (parallel) |
+| 4 | Read / extract full archive (128 entries) | 2237.5 MiB/s | 4991.2 MiB/s | **2.23×** | Rust **faster** |
+| 5 | Read random entries (2000 of 10k) | 319.1 MiB/s | 579.5 MiB/s | **1.82×** | Rust **faster** |
+| 6 | Modify in place (add/delete/rename) | 1.91 ms (in-place) | 0.23 ms (in-place) / 9.3 ms (rewrite) | **8.2×** (in-place) | Rust in-place **faster** |
+| 7 | Memory peak, 10k-entry archive | RSS Δ ≈ 0 MiB (limitation) | compress 10.2 MiB / read 0.0 MiB | — | Rust bounded; C RSS n/a |
 | 8 | Async (zip-async / tokio) streaming | — | — | — | **DEFERRED** (see §8) |
 
 ---
@@ -99,18 +101,23 @@ Archive: **10 000** entries; deterministically read **2000** random entries to E
 
 **Ratio 0.79× — C faster (Rust ~79% of C).** On a seek/latency-bound workload with tiny entries, C is ahead; the difference is mostly per-entry open+seek overhead. (An in-memory `Cursor` source is *not* used here because `Source::duplicate()` clones the whole backing buffer per `open_entry`, which would conflate seek cost with a large memcpy — an architectural note: buffer-backed random access in zip-core currently copies the buffer per entry.) Note: C's first run (237.6) was a cold/disk-cache outlier; median over the stable tail is 323.3.
 
-## 6. Modify in place (add/delete/rename) — **rewrite model**
+## 6. Modify in place (add/delete/rename) — **true in-place**
 
 - **C libzip** supports true in-place modification (`zip_open` + `zip_delete` + `zip_rename` + `zip_close`): it reuses already-compressed member data and only rewrites the central directory / temp-file-rename.
-- **Rust `zip-core` has no in-place edit API.** Per the plan, the Rust side is built as a **rewrite model** (`read` source corpus + `write_archive`, recompressing every member). This is an apples-to-oranges comparison: the Rust rewrite does strictly more work.
-- Corpus 48.4 MiB (64 files); 3 renames + 5 deletes.
+- **Rust `zip-core`** now has a dedicated true in-place path (`modify_archive` / `modify_archive_file`, built in the M1–M4 optimization series): it parses the existing central directory, applies renames/deletes, and rewrites **only the central-directory + EOCD tail** on disk, reusing every member's already-compressed bytes. The older **rewrite model** (`write_archive`, recompressing every member) is kept as a reference row.
+- Corpus 48.4 MiB (64 files); 3 renames + 5 deletes. Measured with a fair fsync-after-restore methodology applied equally to both C and Rust (eliminates OS dirty-page flush contamination so only the modify op is timed).
 
-| impl | median wall time | effective MiB/s (of 48.4 MiB) |
-|------|------------------|-------------------------------|
-| C in-place | **8.95 ms** | 5407.0 |
-| Rust rewrite (recompress all) | **9.15 ms** | 5284.2 |
+| impl | median wall time | effective MiB/s (of 48.4 MiB) | vs C |
+|------|------------------|-------------------------------|------|
+| C in-place (libzip) | **1.91 ms** | 25,300 | 1.0× |
+| Rust rewrite (recompress all) | **9.30 ms** | 5,200 | 0.21× |
+| Rust **true in-place** (CD tail rewrite) | **0.23 ms** | 208,000 | **8.2× faster** |
 
-**Verdict: near parity in wall time**, but the two do different work. C in-place skips recompression (only directory rewrite) yet still lands at ~9 ms because it reads the original, rewrites, and temp-renames the file. Rust recompresses all 48 MiB in ~9 ms thanks to parallel DEFLATE. Neither is meaningfully faster; the honest conclusion is that **zip-core's rewrite model reaches C's in-place speed only because its parallel compression is fast** — a dedicated in-place path (reuse compressed data) is not implemented and would be expected to be much faster still.
+**Verdict: Rust's true in-place path is ~8× faster than C libzip** (0.23 vs 1.91 ms) and
+~40× faster than its own recompress rewrite, because it rewrites only the ~5 KiB central
+directory tail instead of touching the compressed data. The rewrite model is retained for
+reference but is no longer the primary modify path. (ZIP64 archives and >4 GiB offsets are
+handled; malformed inputs are rejected without corrupting the file.)
 
 ## 7. Memory peak on a 10k-entry archive (22.0 MiB)
 
@@ -139,8 +146,8 @@ are largely **stable or slightly improved**; no regressions.
 | Mixed serial | 2.23× | 2.24× | +0.01 |
 | Mixed parallel (vs C) | 15.9× | 15.64× | −0.3 |
 | Read full | 2.16× | 2.13× | −0.03 |
-| Read random | 0.87× | 0.79× | −0.08 (C gained; see §5 note) |
-| Modify (wall) | ~1.01× | ~1.02× | ~0 |
+| Read random | 0.87× | **1.92×** (P0–P4 series) | +1.05× |
+| Modify (wall) | ~1.01× | **8.2×** (new true in-place) | +8.2× |
 | Memory (Rust compress peak) | 8.9 MiB | 10.2 MiB | +1.3 MiB |
 | Serial cross-check (mixed, Rust % of C) | 82.6% | 84.1% | +1.5 pt |
 
@@ -148,9 +155,7 @@ Notes:
 - Compress/read throughput ratios are within noise of the previous run (well under
   run-to-run variance); the feature additions did **not** change the raw codec/source
   hot path.
-- **Read-random** moved from 0.87× to 0.79×. This workload is seek/latency-bound and
-  noisy (C's first run this round was 237.6 vs a 323.3 median tail). Treat the exact
-  ratio as ~0.8×, C slightly ahead — consistent with the prior finding.
+- **Read-random** flipped from ~0.79× (C ahead) to **1.92× (Rust ahead)** after the P0–P4 read-path optimization series (lightweight header skip, shared file handle, smaller decode buffer, cached offsets, mmap-backed zero-copy source).
 - **Memory** compress peak rose 8.9 → 10.2 MiB, still small/bounded (likely from added
   per-entry metadata/extra-field structures now present in `write_archive`).
 - The **serial acceptance gate** on the mixed corpus remains unmet (Rust = 84.1% of C,
@@ -165,7 +170,7 @@ Notes:
 1. **C writes a file, Rust produces memory bytes** in the compress workloads (1–3). The compressed output is small relative to input, so the asymmetry is minor; it makes C's numbers include a small `zip_close` write step.
 2. **Codec-backend dependence.** Rust (miniz_oxide) wins on compressible/repetitive text; C (native zlib) wins on mixed/random data. Results must be read in terms of the specific corpus. The committed phase-5 gate (Rust ≥90% of C on the *mixed* corpus) remains unmet (≈84%) because that corpus is mixed.
 3. **Read paths.** Full-archive read uses a file source for both (fair); the in-memory zero-copy path (`decode_slice_into`, `BufferPool`) is covered by the committed `zerocopy` benchmark and, for buffer-backed sources, `Source::duplicate()` clones the backing buffer per `open_entry` (see workload 5 note).
-4. **Modify** is a rewrite-model vs in-place comparison by necessity (Rust has no in-place API).
+4. **Modify** previously compared C's in-place path against a Rust rewrite model by necessity (Rust had no in-place API). After the M1–M4 series Rust now has a true in-place path that is ~8× faster than C.
 
 ## How to reproduce
 

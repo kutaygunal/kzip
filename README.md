@@ -39,13 +39,13 @@ deterministic corpora (DEFLATE level 6, same machine, 24 logical CPUs).
 
 | Workload | C libzip 1.11.4 | kzip (Rust) | Ratio | Verdict |
 |----------|-----------------|-------------|-------|---------|
-| Compress small (1–64 KiB) | 433.7 MiB/s | 647.1 MiB/s | **1.49×** | Rust faster |
-| Compress large (1 GiB) | 368.6 MiB/s | 861.7 MiB/s | **2.34×** | Rust faster |
-| Compress mixed (serial) | 381.2 MiB/s | 843.2 MiB/s | **2.21×** | Rust faster |
-| Compress mixed (**parallel**, 24) | — | 5896.3 MiB/s | **15.5×** vs C | Rust much faster |
-| Read full archive | 2142.0 MiB/s | 4998.4 MiB/s | **2.33×** | Rust faster |
-| Read random entries | 310.9 MiB/s | 598.2 MiB/s | **1.92×** | Rust faster |
-| Modify in place | 9.55 ms | 9.69 ms | ~1.01× | parity |
+| Compress small (1–64 KiB) | 441.7 MiB/s | 650.9 MiB/s | **1.47×** | Rust faster |
+| Compress large (1 GiB) | 369.6 MiB/s | 835.8 MiB/s | **2.26×** | Rust faster |
+| Compress mixed (serial) | 372.9 MiB/s | 855.3 MiB/s | **2.29×** | Rust faster |
+| Compress mixed (**parallel**, 24) | — | 6203.4 MiB/s | **16.6×** vs C | Rust much faster |
+| Read full archive | 2237.5 MiB/s | 4991.2 MiB/s | **2.23×** | Rust faster |
+| Read random entries | 319.1 MiB/s | 579.5 MiB/s | **1.82×** | Rust faster |
+| Modify in place | 1.91 ms | 0.23 ms (in-place) / 9.3 ms (rewrite) | **8.2×** | Rust in-place **faster** |
 
 > Full methodology, per-workload detail, and raw data:
 > [results/benchmark-report.md](results/benchmark-report.md).
