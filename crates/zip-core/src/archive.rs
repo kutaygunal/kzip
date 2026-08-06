@@ -16,7 +16,7 @@ use crate::dirent::Dirent;
 use crate::error::{Result, ZipError, ZipErrorCode};
 use crate::file::EntryReader;
 use crate::reader;
-use crate::source::{Source, Stat};
+use crate::source::{SharedFile, SharedFileState, Source, Stat};
 use std::io::Read;
 use std::sync::{Arc, Mutex};
 
@@ -34,6 +34,11 @@ pub struct Archive {
     entries: Vec<Dirent>,
     comment: String,
     is_zip64: bool,
+    /// Shared, mutex-protected file handle used to open per-entry readers
+    /// without a per-entry `try_clone`/`DuplicateHandle` (P1). `None` for
+    /// non-file sources (e.g. in-memory buffers), which fall back to
+    /// `duplicate_at`.
+    shared: Option<Arc<Mutex<SharedFileState>>>,
     /// Reusable decode buffers for the zero-copy read path, shared with the
     /// `EntryReader`s it produces.
     pool: Arc<Mutex<BufferPool>>,
@@ -58,11 +63,15 @@ impl Archive {
     pub fn open<S: Source + 'static>(src: S) -> Result<Archive> {
         let mut boxed: Box<dyn Source> = Box::new(src);
         let cd = read_central_dir(&mut boxed)?;
+        // Grab a shared file handle (if this is a real file) so per-entry
+        // readers can share it instead of cloning the OS handle each time.
+        let shared = boxed.shared_handle();
         Ok(Archive {
             src: boxed,
             entries: cd.entries,
             comment: cd.comment,
             is_zip64: cd.is_zip64,
+            shared,
             pool: Arc::new(Mutex::new(BufferPool::new(BUFFER_POOL_CAPACITY))),
             password: Mutex::new(None),
         })
@@ -208,7 +217,7 @@ impl Archive {
         if d.comp_size > MAX_CD_SIZE {
             return Err(ZipError::new(ZipErrorCode::CentralDirTooLarge));
         }
-        let mut dup = self.src.duplicate_at(d.offset)?;
+        let mut dup = self.open_source_at(d.offset)?;
         // Lightweight local-header skip: read only the 30-byte fixed header,
         // then seek past the filename + extra fields to the data start. This
         // avoids the per-entry heap allocations and extra-field parsing of
@@ -219,10 +228,22 @@ impl Archive {
         Ok(data)
     }
 
+    /// Open a source positioned at `offset`, preferring the shared file handle
+    /// (no per-entry `try_clone`/`DuplicateHandle`) and falling back to
+    /// `duplicate_at` for non-file sources.
+    fn open_source_at(&self, offset: u64) -> Result<Box<dyn Source>> {
+        if let Some(shared) = &self.shared {
+            Ok(Box::new(SharedFile::at_offset(shared.clone(), offset)))
+        } else {
+            self.src.duplicate_at(offset)
+        }
+    }
+
     fn open_dirent(&self, d: &Dirent, password: Option<&[u8]>) -> Result<EntryReader> {
-        // Clone + seek in one step (avoids the redundant `seek(0)` that
-        // `duplicate()` performs and that we would immediately overwrite).
-        let mut dup = self.src.duplicate_at(d.offset)?;
+        // Open a source at the entry's local-header offset. For a real file
+        // this shares the archive's single handle (no per-entry
+        // `try_clone`/`DuplicateHandle`); for other sources it clones.
+        let mut dup = self.open_source_at(d.offset)?;
         // Lightweight local-header skip: read only the 30-byte fixed header,
         // then seek past the filename + extra fields to the data start. This
         // avoids the per-entry heap allocations and extra-field parsing of

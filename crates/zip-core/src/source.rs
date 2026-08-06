@@ -9,7 +9,8 @@
 //! (e.g. decompress, decrypt). Writers are handled by `WriteSource`.
 
 use crate::error::{Result, ZipError, ZipErrorCode};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{self, Read, Seek, SeekFrom};
+use std::sync::{Arc, Mutex};
 
 /// Metadata about a source/entry, mirroring libzip's `zip_stat_t`.
 /// Field names are self-explanatory; missing-docs allowed to reduce noise.
@@ -111,6 +112,18 @@ pub trait Source: Read + Seek + Send + Sync {
             .map_err(|e| ZipError::with_system(ZipErrorCode::Seek, e))?;
         Ok(d)
     }
+
+    /// If this source is backed by a real file, return a shared, mutex-
+    /// protected handle to it.
+    ///
+    /// The archive uses this to open per-entry readers from a single shared
+    /// handle instead of cloning the OS handle per entry (`try_clone` /
+    /// `DuplicateHandle`, the single most expensive syscall on the read-open
+    /// path). Each reader tracks its own logical position and serializes its
+    /// reads on the shared handle's mutex. Default: `None` (non-file sources).
+    fn shared_handle(&self) -> Option<Arc<Mutex<SharedFileState>>> {
+        None
+    }
 }
 
 impl Source for std::fs::File {
@@ -141,6 +154,126 @@ impl Source for std::fs::File {
         f.seek(SeekFrom::Start(offset))
             .map_err(|e| ZipError::with_system(ZipErrorCode::Seek, e))?;
         Ok(Box::new(f))
+    }
+
+    fn shared_handle(&self) -> Option<Arc<Mutex<SharedFileState>>> {
+        // Clone the OS handle once (at archive open), then share it across all
+        // per-entry readers. This is the single `DuplicateHandle` that replaces
+        // the per-entry `try_clone` on the read-open path.
+        let file = self.try_clone().ok()?;
+        // `last_pos` is a sentinel (`u64::MAX`) so the first read always seeks:
+        // on Windows a duplicated handle shares the OS file pointer with the
+        // original, which `read_central_dir` has already moved, so the shared
+        // handle's actual position is unknown (not 0) at creation.
+        Some(Arc::new(Mutex::new(SharedFileState {
+            file,
+            last_pos: u64::MAX,
+        })))
+    }
+}
+
+/// Shared mutable state for a [`SharedFile`]: the underlying file plus the
+/// last position the shared OS file pointer was left at. A reader skips the
+/// seek when the shared pointer is already where it needs to be (the common
+/// sequential single-reader case), and re-seeks when another reader moved it
+/// (concurrent readers), keeping the shared handle correct for both.
+pub struct SharedFileState {
+    pub(crate) file: std::fs::File,
+    pub(crate) last_pos: u64,
+}
+
+impl std::fmt::Debug for SharedFileState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedFileState")
+            .field("last_pos", &self.last_pos)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A `Source` backed by a shared, mutex-protected file handle.
+///
+/// Multiple readers created from the same archive share one OS file handle
+/// (no per-entry `try_clone`/`DuplicateHandle`). Each reader keeps its own
+/// logical position `pos`; every read locks the shared handle, seeks only if
+/// the shared pointer is not already at `pos`, reads, and advances `pos`.
+/// This is correct for concurrent readers (they serialize on the mutex and
+/// re-seek to their own position) and cheap for the sequential case (no
+/// redundant seek once the pointer is already in place).
+pub struct SharedFile {
+    inner: Arc<Mutex<SharedFileState>>,
+    pos: u64,
+}
+
+impl std::fmt::Debug for SharedFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedFile")
+            .field("pos", &self.pos)
+            .finish_non_exhaustive()
+    }
+}
+
+impl SharedFile {
+    /// Create a reader over the shared handle positioned at `offset`.
+    pub fn at_offset(inner: Arc<Mutex<SharedFileState>>, offset: u64) -> Self {
+        SharedFile { inner, pos: offset }
+    }
+}
+
+impl Read for SharedFile {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let mut state = self
+            .inner
+            .lock()
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "shared file lock poisoned"))?;
+        if state.last_pos != self.pos {
+            state.file.seek(SeekFrom::Start(self.pos))?;
+            state.last_pos = self.pos;
+        }
+        let n = state.file.read(buf)?;
+        self.pos += n as u64;
+        state.last_pos = self.pos;
+        Ok(n)
+    }
+}
+
+impl Seek for SharedFile {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        let new_pos = match pos {
+            SeekFrom::Start(p) => p,
+            SeekFrom::Current(d) => (self.pos as i64 + d).max(0) as u64,
+            SeekFrom::End(d) => {
+                let state = self
+                    .inner
+                    .lock()
+                    .map_err(|_| io::Error::new(io::ErrorKind::Other, "shared file lock poisoned"))?;
+                let len = state.file.metadata()?.len();
+                (len as i64 + d).max(0) as u64
+            }
+        };
+        self.pos = new_pos;
+        Ok(new_pos)
+    }
+}
+
+impl Source for SharedFile {
+    fn supports(&self) -> Supports {
+        Supports::ReadableAndSeekable
+    }
+
+    fn duplicate(&self) -> Result<Box<dyn Source>> {
+        // Share the same handle; no OS handle clone. Positioned at the start.
+        Ok(Box::new(SharedFile {
+            inner: self.inner.clone(),
+            pos: 0,
+        }))
+    }
+
+    fn duplicate_at(&self, offset: u64) -> Result<Box<dyn Source>> {
+        // Share the same handle; no OS handle clone. Positioned at `offset`.
+        Ok(Box::new(SharedFile {
+            inner: self.inner.clone(),
+            pos: offset,
+        }))
     }
 }
 
@@ -223,6 +356,47 @@ mod tests {
         let mut b = [0u8; 2];
         dup.read_exact(&mut b).unwrap();
         assert_eq!(&b, &[1, 2]);
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// A `SharedFile` reader reads from its own logical position, and two
+    /// readers sharing one handle can interleave correctly (each re-seeks to
+    /// its own position).
+    #[test]
+    fn shared_file_readers_are_independent() {
+        use std::io::Write;
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("zipcore_shared_{}.bin", std::process::id()));
+        let data: Vec<u8> = (0..100u8).collect();
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(&data).unwrap();
+        drop(f);
+
+        let f = std::fs::File::open(&path).unwrap();
+        let shared = f.shared_handle().expect("file exposes shared handle");
+
+        // Two readers at different offsets over the same shared handle.
+        let mut a = SharedFile::at_offset(shared.clone(), 10);
+        let mut b = SharedFile::at_offset(shared.clone(), 50);
+        let mut ba = [0u8; 4];
+        let mut bb = [0u8; 4];
+        // Interleave reads: each must read from its own position.
+        a.read_exact(&mut ba).unwrap();
+        assert_eq!(&ba, &data[10..14]);
+        b.read_exact(&mut bb).unwrap();
+        assert_eq!(&bb, &data[50..54]);
+        // Second reads advance each reader's own position.
+        a.read_exact(&mut ba).unwrap();
+        assert_eq!(&ba, &data[14..18]);
+        b.read_exact(&mut bb).unwrap();
+        assert_eq!(&bb, &data[54..58]);
+
+        // duplicate_at shares the handle and positions at the given offset.
+        let mut c = a.duplicate_at(20).unwrap();
+        let mut bc = [0u8; 3];
+        c.read_exact(&mut bc).unwrap();
+        assert_eq!(&bc, &data[20..23]);
+
         std::fs::remove_file(&path).ok();
     }
 }
