@@ -7,8 +7,8 @@ Source analysis: read-random-analyzer (P0-P4 recommendations).
 |-----|-------------|--------|----------|------|-----------|
 | P0 | Lightweight local-header skip + remove redundant seek/tell in open_dirent | DONE | senior-engineer | zip-core tests (97 pass) | e6cbed9 |
 | P1 | Avoid per-entry DuplicateHandle (shared Arc<Mutex<File>> handle) | DONE | senior-engineer | zip-core tests (98 pass) | 2caa995 |
-| P2 | Reduce per-entry decode allocations (smaller/pooled buffer) | DONE | senior-engineer | zip-core tests (98 pass) | (not committed) |
-| P3 | Cache data offsets in Dirent | PENDING | | | |
+| P2 | Reduce per-entry decode allocations (smaller/pooled buffer) | DONE | senior-engineer | zip-core tests (98 pass) | 99dbfe3 |
+| P3 | Cache data offsets in Dirent | DONE | senior-engineer | zip-core tests (98 pass) | |
 | P4 | mmap-backed source (zero-copy random access) | PENDING | | | |
 
 Baseline read_random: C=323.3 MiB/s, Rust=255.9 MiB/s (0.79x).
@@ -40,3 +40,20 @@ P2 approach: `Decoder::new` (and `decode_slice_into`) now size the flate2
 allocate only what they need; large entries keep the 8 KiB buffer, so read_full
 throughput is unchanged. Correctness is unaffected (a smaller buffer merely
 means more underlying reads); CRC/size verification is untouched.
+
+P3 result (this run): Rust read_random = ~399-408 MiB/s (median, up from ~312;
+C ~304-311); read_full = ~4945 MiB/s (no regression vs ~4907 baseline).
+
+P3 approach: `Dirent` now carries a lazily-computed, cached `data_offset`
+(`Mutex<Option<u64>>`, interior-mutable so it can be filled from a shared
+`&Dirent`; `Clone` is implemented manually and resets the cache to `None`).
+`open_dirent`/`read_compressed_entry` call `Dirent::data_offset(&mut dup)`
+instead of `local_header_len` on every open: the first open reads the 30-byte
+fixed header and seeks past filename+extra (as before) and caches the result;
+subsequent opens of the same entry skip the header read entirely and just seek
+the freshly-opened source to the cached offset. This is a clean general win for
+repeated access to the same entry and avoids recomputing the local-header data
+offset on every open. The shared `Arc<Mutex<File>>` handle (P1), lightweight
+local-header skip (P0), and smaller decode buffer (P2) are all preserved; the
+write path and decode-loop semantics are untouched; CRC/size verification is
+unchanged.

@@ -222,6 +222,8 @@ impl Archive {
         // then seek past the filename + extra fields to the data start. This
         // avoids the per-entry heap allocations and extra-field parsing of
         // `parse_local` (the central directory already carries the metadata).
+        // The result is cached in the `Dirent` (P3), so repeated opens of the
+        // same entry skip this read/seek entirely.
         Dirent::local_header_len(&mut dup)?;
         let mut data = vec![0u8; d.comp_size as usize];
         reader::read_exact(&mut dup, &mut data)?;
@@ -248,7 +250,9 @@ impl Archive {
         // then seek past the filename + extra fields to the data start. This
         // avoids the per-entry heap allocations and extra-field parsing of
         // `parse_local` (the central directory already carries the metadata).
-        let data_offset = Dirent::local_header_len(&mut dup)?;
+        // The result is cached in the `Dirent` (P3), so repeated opens of the
+        // same entry skip this read/seek entirely.
+        let data_offset = d.data_offset(&mut dup)?;
         let encrypted = d.bitflags & crate::constant::flag::ENCRYPTED != 0;
         let comp_size = d.comp_size;
         let uncomp_size = d.uncomp_size;

@@ -12,6 +12,7 @@ use crate::crypto::aes_method_from_strength;
 use crate::error::{Result, ZipError, ZipErrorCode};
 use crate::reader;
 use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::sync::Mutex;
 
 /// An extra field record `(id, data)`.
 pub type ExtraField = (u16, Vec<u8>);
@@ -35,7 +36,7 @@ pub fn serialize_extra_fields(fields: &[ExtraField]) -> Result<Vec<u8>> {
 }
 
 /// A parsed directory entry (local or central).
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Dirent {
     /// Version made by (upper byte = host OS).
     pub version_madeby: u16,
@@ -67,6 +68,14 @@ pub struct Dirent {
     pub ext_attrib: u32,
     /// Offset of the local file header in the archive.
     pub offset: u64,
+    /// Cached offset where the entry's data begins (immediately after the
+    /// local file header's fixed + filename + extra portion). Computed lazily
+    /// on the first open and reused for subsequent opens, so repeated access
+    /// to the same entry avoids re-reading/re-seeking the local header (P3).
+    /// `None` until first computed. Interior-mutable so it can be filled from
+    /// a shared `&Dirent`; `Mutex` (rather than `OnceLock`) keeps `Dirent`
+    /// `Clone`-able.
+    pub data_offset: Mutex<Option<u64>>,
     /// Encryption method (0 = none).
     pub encryption_method: u16,
     /// Whether the stored CRC is valid/trustworthy. WinZip AES AE-2 entries
@@ -75,6 +84,35 @@ pub struct Dirent {
     pub crc_valid: bool,
     /// Raw extra-field records `(id, data)`.
     pub extra_fields: Vec<ExtraField>,
+}
+
+impl Clone for Dirent {
+    /// Clone all fields but reset the lazily-computed `data_offset` cache to
+    /// `None` (a `Mutex` is not `Clone`; the clone will recompute on first
+    /// open, which is correct).
+    fn clone(&self) -> Self {
+        Dirent {
+            version_madeby: self.version_madeby,
+            version_needed: self.version_needed,
+            bitflags: self.bitflags,
+            comp_method: self.comp_method,
+            last_mod_time: self.last_mod_time,
+            last_mod_date: self.last_mod_date,
+            crc: self.crc,
+            comp_size: self.comp_size,
+            uncomp_size: self.uncomp_size,
+            filename: self.filename.clone(),
+            comment: self.comment.clone(),
+            disk_number: self.disk_number,
+            int_attrib: self.int_attrib,
+            ext_attrib: self.ext_attrib,
+            offset: self.offset,
+            data_offset: Mutex::new(None),
+            encryption_method: self.encryption_method,
+            crc_valid: self.crc_valid,
+            extra_fields: self.extra_fields.clone(),
+        }
+    }
 }
 
 impl Dirent {
@@ -186,6 +224,7 @@ impl Dirent {
             int_attrib,
             ext_attrib,
             offset,
+            data_offset: Mutex::new(None),
             encryption_method,
             crc_valid,
             extra_fields,
@@ -277,12 +316,34 @@ impl Dirent {
                 int_attrib: 0,
                 ext_attrib: 0,
                 offset: 0,
+                data_offset: Mutex::new(None),
                 encryption_method,
                 crc_valid,
                 extra_fields,
             },
             header_total,
         ))
+    }
+
+    /// Return the offset where this entry's data begins, computing it lazily
+    /// from `src` (positioned at the entry's local-header offset) on the first
+    /// call and caching it for reuse. Subsequent calls return the cached value
+    /// without touching `src`, so repeated opens of the same entry skip the
+    /// local-header read/seek entirely (P3).
+    pub fn data_offset(&self, src: &mut (impl Read + Seek)) -> Result<u64> {
+        if let Some(off) = *self.data_offset.lock().unwrap_or_else(|e| e.into_inner()) {
+            // Cached: `src` was freshly opened at the local-header offset, so
+            // position it at the data offset before returning.
+            src.seek(SeekFrom::Start(off))
+                .map_err(|e| ZipError::with_system(ZipErrorCode::Seek, e))?;
+            return Ok(off);
+        }
+        // First open: `local_header_len` reads the fixed header and seeks past
+        // the filename + extra fields, leaving `src` positioned at the data
+        // start; cache that offset for reuse.
+        let off = Self::local_header_len(src)?;
+        *self.data_offset.lock().unwrap_or_else(|e| e.into_inner()) = Some(off);
+        Ok(off)
     }
 
     /// Lightweight local-header skip for the read-open path.
