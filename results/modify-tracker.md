@@ -14,7 +14,7 @@ Analyzer: modify-analyzer (MODIFY_ANALYSIS_DONE).
 |---|-------|--------|----------|------|--------|
 | M0 | Harness & measurement baseline | DONE (folded into M3) | — | — | — |
 | M1 | CD serializer for Dirent + expose cdir_offset | DONE | engineer-m1 | testing-m1 (M1_TEST_PASS) | 3b9326b |
-| M2 | Byte-array true in-place modify | PENDING | | | |
+| M2 | Byte-array true in-place modify | DONE | engineer-m2 | testing-m2 (M2_TEST_PASS) | 1901852 |
 | M3 | File-based in-place write + wire benchmark | PENDING | | | |
 | M4 | Hardening: ZIP64, overflow, regression guard | PENDING | | | |
 | M5 | (optional) local-header parity | — | | | |

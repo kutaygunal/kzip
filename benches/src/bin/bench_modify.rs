@@ -16,10 +16,22 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::path::Path;
 use std::time::Instant;
-use zip_core::{write_archive, ArchiveFile, CompressOptions};
+use zip_core::{modify_archive_file, write_archive, ArchiveFile, CompressOptions};
 
 const ITERS: usize = 5;
 const FILE_COUNT: usize = 64;
+
+/// Flush a file's dirty pages to disk (outside the timed region). Restoring
+/// the pristine archive with `std::fs::write` leaves dirty OS pages that are
+/// otherwise flushed *inside* the timed window, dominating a ~1 ms in-place
+/// modify op and hiding the true in-place win. Fsyncing right after the
+/// restore gives a fair measurement of the modify operation itself, equally
+/// for both C and Rust.
+fn fsync_file(path: &Path) {
+    use std::fs::File;
+    let f = File::options().read(true).write(true).open(path).expect("open for fsync");
+    f.sync_all().expect("sync_all failed");
+}
 
 fn main() {
     let api = unsafe { CApi::load(Path::new(&zip_dll_path())) }.unwrap_or_else(|e| {
@@ -101,10 +113,28 @@ fn main() {
         t.elapsed().as_secs_f64()
     }
 
+    // ---- Rust TRUE in-place modify (mirrors C) ----
+    fn rust_modify_inplace(
+        path: &Path,
+        renames: &[(u64, &str)],
+        deletes: &[u64],
+    ) -> f64 {
+        let renames_owned: Vec<(u64, String)> = renames
+            .iter()
+            .map(|(i, n)| (*i, n.to_string()))
+            .collect();
+        let t = Instant::now();
+        let _new_len = modify_archive_file(path, &renames_owned, deletes)
+            .expect("rust in-place modify failed");
+        t.elapsed().as_secs_f64()
+    }
+
     // Warmup both.
     unsafe { c_modify(&api, &arch_path, &renames, &deletes) };
     std::fs::write(&arch_path, &original_bytes).unwrap();
     let _ = rust_rewrite(&files, &renames, &deletes, &opts);
+    std::fs::write(&arch_path, &original_bytes).unwrap();
+    let _ = rust_modify_inplace(&arch_path, &renames, &deletes);
 
     let mut rows = String::new();
     rows.push_str(&csv_header(false));
@@ -113,6 +143,7 @@ fn main() {
     let mut c_secs = Vec::new();
     for run in 0..ITERS {
         std::fs::write(&arch_path, &original_bytes).unwrap(); // restore original
+        fsync_file(&arch_path); // clear restore's dirty pages (fair timing)
         let secs = unsafe { c_modify(&api, &arch_path, &renames, &deletes) };
         c_secs.push(secs);
         rows.push_str(&csv_row_wl(
@@ -145,15 +176,36 @@ fn main() {
         ));
     }
 
+    // Rust TRUE in-place modify (rewrites only the ~5 KiB central directory).
+    let mut ri_secs = Vec::new();
+    for run in 0..ITERS {
+        std::fs::write(&arch_path, &original_bytes).unwrap(); // restore original
+        fsync_file(&arch_path); // clear restore's dirty pages (fair timing)
+        let secs = rust_modify_inplace(&arch_path, &renames, &deletes);
+        ri_secs.push(secs);
+        rows.push_str(&csv_row_wl(
+            "rust_zip_core",
+            env!("CARGO_PKG_VERSION"),
+            "modify_inplace",
+            run + 1,
+            total_uncomp,
+            secs,
+            total_uncomp as f64 / secs / (1024.0 * 1024.0),
+            None,
+        ));
+    }
+    std::fs::remove_file(&arch_path).ok();
+
     write_csv("benchmark-modify", &rows).unwrap_or_else(|e| {
         eprintln!("{e}");
         std::process::exit(1);
     });
 
     eprintln!(
-        "modify: C in-place {:.4} ms vs Rust rewrite {:.4} ms ({:.1} MiB corpus; C reuses compressed data, Rust recompresses)",
+        "modify: C in-place {:.4} ms | Rust rewrite {:.4} ms | Rust in-place {:.4} ms ({:.1} MiB corpus; C and Rust in-place reuse compressed data, Rust rewrite recompresses)",
         median(c_secs) * 1000.0,
         median(r_secs) * 1000.0,
+        median(ri_secs) * 1000.0,
         total_uncomp as f64 / (1024.0 * 1024.0),
     );
 }

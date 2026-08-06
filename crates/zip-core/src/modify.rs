@@ -12,7 +12,8 @@
 use crate::cdir::{read_central_dir, CentralDir};
 use crate::error::{Result, ZipError, ZipErrorCode};
 use crate::source::Source;
-use std::io::Cursor;
+use std::io::{Cursor, Seek, SeekFrom, Write};
+use std::path::Path;
 
 /// Modify an in-memory ZIP archive's central directory in place and return the
 /// new archive bytes.
@@ -97,6 +98,117 @@ pub fn modify_archive(
     out.extend_from_slice(&bytes[..cdir_offset as usize]);
     out.extend_from_slice(&new_serialized);
     Ok(out)
+}
+
+/// Modify a ZIP archive **truly in place** on disk and return the new total
+/// file length in bytes.
+///
+/// This is the file-backed counterpart to [`modify_archive`] and matches how C
+/// libzip edits an existing archive: the existing local headers + compressed
+/// member data are **never touched or recompressed** — only the tail of the
+/// file (the central directory and EOCD) is rewritten in place.
+///
+/// - The archive at `path` is opened for read+write and its central directory
+///   is parsed via [`read_central_dir`] (reusing the existing reader over the
+///   `File` as a seekable [`Source`]).
+/// - `renames` and `deletes` are applied to the parsed `Dirent`s using the
+///   exact same logic as [`modify_archive`] (indices refer to the original
+///   entry positions, *before* any deletion).
+/// - The modified entries are re-serialized with [`CentralDir::serialize`].
+/// - The file is seeked to the original `cdir_offset` and the new
+///   CD+EOCD bytes are written there, then the file is truncated with
+///   `set_len(cdir_offset + new_cd_eocd_len)`. The data region
+///   `[0 .. cdir_offset)` is left byte-for-byte untouched.
+///
+/// On success the new total file length is returned.
+///
+/// Error semantics (the file is **never corrupted**): every parse/serialize
+/// step happens *before* the file is written to. If any error occurs before
+/// the write, the file is left unmodified. Once the write begins, a short
+/// write is reported as an error, but because the new CD+EOCD is computed from
+/// a fully-parsed, consistent archive and written at the recorded offset, the
+/// archive either gains a correct new tail or fails cleanly.
+///
+/// ZIP64 archives are not yet supported by the writer and return
+/// [`ZipErrorCode::Opnotsupp`] (M4 adds ZIP64), without modifying the file.
+pub fn modify_archive_file(
+    path: &Path,
+    renames: &[(u64, String)],
+    deletes: &[u64],
+) -> Result<u64> {
+    // Open the existing file read+write. If this fails (missing file, missing
+    // permission) nothing is modified.
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|e| ZipError::with_system(ZipErrorCode::Open, e))?;
+
+    // Parse the central directory using a cloned handle as a seekable source.
+    // We keep the original `file` handle for the write; on Windows a
+    // `try_clone` shares the OS file pointer with `file`, but we explicitly
+    // seek `file` before writing, so the reader's traversal leaves no stale
+    // position that could corrupt the write.
+    let reader = file
+        .try_clone()
+        .map_err(|e| ZipError::with_system(ZipErrorCode::Open, e))?;
+    let mut src: Box<dyn Source> = Box::new(reader);
+    let cd = read_central_dir(&mut src)?;
+
+    // ZIP64 writing is unsupported; reject cleanly (M4 adds it). Nothing has
+    // been written, so the file is still untouched.
+    if cd.is_zip64 {
+        return Err(ZipError::new(ZipErrorCode::Opnotsupp));
+    }
+
+    let cdir_offset = cd.cdir_offset;
+    let mut entries = cd.entries;
+
+    // Apply renames by original index (skip out-of-range indices).
+    for (idx, new_name) in renames {
+        let i = *idx as usize;
+        if i < entries.len() {
+            entries[i].filename = new_name.clone();
+        }
+    }
+
+    // Drop deleted indices (original index space; renames don't change length,
+    // so the same indices remain valid). Removing descending keeps earlier
+    // indices stable.
+    let mut dels: Vec<u64> = deletes.to_vec();
+    dels.sort_unstable();
+    dels.dedup();
+    for d in dels.iter().rev() {
+        let i = *d as usize;
+        if i < entries.len() {
+            entries.remove(i);
+        }
+    }
+
+    // Re-serialize the central directory with the modified/trimmed entries.
+    let new_cd = CentralDir {
+        entries,
+        comment: cd.comment.clone(),
+        is_zip64: false,
+        cdir_size: cd.cdir_size,
+        cdir_offset,
+    };
+    let new_serialized = new_cd.serialize()?;
+
+    // All parse/serialize work is done. Now the actual in-place write: seek to
+    // the recorded central-directory offset, overwrite the old CD+EOCD with
+    // the new one, then truncate the file so any trailing bytes (a longer old
+    // tail) are removed. The data region before `cdir_offset` is never
+    // touched.
+    file.seek(SeekFrom::Start(cdir_offset))
+        .map_err(|e| ZipError::with_system(ZipErrorCode::Seek, e))?;
+    file.write_all(&new_serialized)
+        .map_err(|e| ZipError::with_system(ZipErrorCode::Write, e))?;
+    let new_len = cdir_offset + new_serialized.len() as u64;
+    file.set_len(new_len)
+        .map_err(|e| ZipError::with_system(ZipErrorCode::Write, e))?;
+
+    Ok(new_len)
 }
 
 #[cfg(test)]
@@ -206,6 +318,98 @@ mod tests {
 
         // Non-affected entry content is byte-identical to original.
         assert_eq!(read_entry(&out, "keep/me.dat").unwrap(), d);
+    }
+
+    /// File-backed true in-place modification: write an archive to disk,
+    /// rename + delete entries via `modify_archive_file`, then reopen and
+    /// assert the new names/content, deleted absence, untouched entries, the
+    /// new file length, and that the data region `[0..cdir_offset)` is
+    /// byte-for-byte unchanged.
+    #[test]
+    fn modify_file_inplace() {
+        let original = build_corpus();
+
+        // Data region of the original (local headers + compressed data).
+        let orig_data_region = {
+            let mut src: Box<dyn Source> = Box::new(Cursor::new(original.clone()));
+            let cd = read_central_dir(&mut src).unwrap();
+            let end = cd.cdir_offset as usize;
+            original[..end].to_vec()
+        };
+        let orig_cdir_offset = {
+            let mut src: Box<dyn Source> = Box::new(Cursor::new(original.clone()));
+            read_central_dir(&mut src).unwrap().cdir_offset
+        };
+        let orig_count = {
+            let mut src: Box<dyn Source> = Box::new(Cursor::new(original.clone()));
+            read_central_dir(&mut src).unwrap().entries.len()
+        };
+
+        // Original contents keyed by name.
+        let a = read_entry(&original, "a.txt").unwrap();
+        let c = read_entry(&original, "c.txt").unwrap();
+        let d = read_entry(&original, "keep/me.dat").unwrap();
+
+        let path = std::env::temp_dir().join(format!(
+            "zipcore_modify_file_inplace_{}.zip",
+            std::process::id()
+        ));
+        std::fs::write(&path, &original).unwrap();
+
+        // Rename indices 0 and 2; delete index 1; include out-of-range indices
+        // (must be ignored, no error, no corruption).
+        let new_len = modify_archive_file(
+            &path,
+            &[
+                (0, "renamed_a.txt".to_string()),
+                (2, "renamed_c.txt".to_string()),
+                (999, "ignored.txt".to_string()),
+            ],
+            &[1, 999],
+        )
+        .unwrap();
+
+        // Reopen the file on disk and verify the final state.
+        let bytes = std::fs::read(&path).unwrap();
+        let mut src: Box<dyn Source> = Box::new(Cursor::new(bytes.clone()));
+        let cd = read_central_dir(&mut src).unwrap();
+
+        // New file length == cdir_offset + new CD+EOCD length.
+        let new_cdir_offset = cd.cdir_offset;
+        let expected_len = new_cdir_offset + cd.cdir_size + 22; // + EOCD fixed size
+        assert_eq!(
+            new_len, expected_len,
+            "returned length should equal data end + new CD + EOCD"
+        );
+        assert_eq!(bytes.len() as u64, new_len, "on-disk file length should match");
+
+        // EOCD entry count = original count - real deletions (1).
+        assert_eq!(cd.entries.len(), orig_count - 1);
+        assert_eq!(cd.entries.len(), 3);
+
+        // Renamed entries present under NEW names with byte-identical content.
+        assert_content(&bytes, "renamed_a.txt", &a);
+        assert_content(&bytes, "renamed_c.txt", &c);
+        // Deleted entry absent.
+        assert!(read_entry(&bytes, "b.bin").is_none());
+        // Non-affected entry byte-identical.
+        assert_content(&bytes, "keep/me.dat", &d);
+        // Old names gone for renamed entries.
+        assert!(read_entry(&bytes, "a.txt").is_none());
+        assert!(read_entry(&bytes, "c.txt").is_none());
+
+        // The data region bytes[0..cdir_offset] is byte-for-byte unchanged.
+        assert_eq!(
+            new_cdir_offset, orig_cdir_offset,
+            "cdir_offset must not move (data region untouched)"
+        );
+        let end = new_cdir_offset as usize;
+        assert_eq!(&bytes[..end], orig_data_region.as_slice());
+
+        // The file shrank to exactly the new length (no trailing garbage).
+        assert_eq!(bytes.len(), end + cd.cdir_size as usize + 22);
+
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]

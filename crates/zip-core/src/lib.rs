@@ -82,5 +82,5 @@ pub use compress::{
 };
 pub use error::{Result, ZipError, ZipErrorCode};
 pub use file::EntryReader;
-pub use modify::modify_archive;
+pub use modify::{modify_archive, modify_archive_file};
 pub use source::{Source, Stat, Supports};
