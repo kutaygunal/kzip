@@ -68,6 +68,7 @@ pub mod crypto;
 pub mod dirent;
 pub mod error;
 pub mod file;
+pub mod modify;
 pub mod reader;
 pub mod source;
 
@@ -81,4 +82,5 @@ pub use compress::{
 };
 pub use error::{Result, ZipError, ZipErrorCode};
 pub use file::EntryReader;
+pub use modify::modify_archive;
 pub use source::{Source, Stat, Supports};

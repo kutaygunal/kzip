@@ -13,7 +13,7 @@ Analyzer: modify-analyzer (MODIFY_ANALYSIS_DONE).
 | # | Phase | Status | Engineer | Test | Commit |
 |---|-------|--------|----------|------|--------|
 | M0 | Harness & measurement baseline | DONE (folded into M3) | — | — | — |
-| M1 | CD serializer for Dirent + expose cdir_offset | DONE | senior-engineer | results/modify-tests (M1 round-trip) | (this commit) |
+| M1 | CD serializer for Dirent + expose cdir_offset | DONE | engineer-m1 | testing-m1 (M1_TEST_PASS) | 3b9326b |
 | M2 | Byte-array true in-place modify | PENDING | | | |
 | M3 | File-based in-place write + wire benchmark | PENDING | | | |
 | M4 | Hardening: ZIP64, overflow, regression guard | PENDING | | | |
