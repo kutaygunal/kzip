@@ -9,7 +9,7 @@ Source analysis: read-random-analyzer (P0-P4 recommendations).
 | P1 | Avoid per-entry DuplicateHandle (shared Arc<Mutex<File>> handle) | DONE | senior-engineer | zip-core tests (98 pass) | 2caa995 |
 | P2 | Reduce per-entry decode allocations (smaller/pooled buffer) | DONE | senior-engineer | zip-core tests (98 pass) | 99dbfe3 |
 | P3 | Cache data offsets in Dirent | DONE | senior-engineer | zip-core tests (98 pass) | be0abfa |
-| P4 | mmap-backed source (zero-copy random access) | DONE | senior-engineer | zip-core tests (99 pass) | (uncommitted) |
+| P4 | mmap-backed source (zero-copy random access) | DONE | senior-engineer | zip-core tests (99 pass) | 1f6a7f6 |
 
 Baseline read_random: C=323.3 MiB/s, Rust=255.9 MiB/s (0.79x).
 
