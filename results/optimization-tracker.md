@@ -6,8 +6,8 @@ Source analysis: read-random-analyzer (P0-P4 recommendations).
 | Opt | Description | Status | Engineer | Test | Committed |
 |-----|-------------|--------|----------|------|-----------|
 | P0 | Lightweight local-header skip + remove redundant seek/tell in open_dirent | DONE | senior-engineer | zip-core tests (97 pass) | e6cbed9 |
-| P1 | Avoid per-entry DuplicateHandle (shared Arc<Mutex<File>> handle) | DONE | senior-engineer | zip-core tests (98 pass) | (not committed) |
-| P2 | Reduce per-entry decode allocations (smaller/pooled buffer) | PENDING | | | |
+| P1 | Avoid per-entry DuplicateHandle (shared Arc<Mutex<File>> handle) | DONE | senior-engineer | zip-core tests (98 pass) | 2caa995 |
+| P2 | Reduce per-entry decode allocations (smaller/pooled buffer) | DONE | senior-engineer | zip-core tests (98 pass) | (not committed) |
 | P3 | Cache data offsets in Dirent | PENDING | | | |
 | P4 | mmap-backed source (zero-copy random access) | PENDING | | | |
 
@@ -28,3 +28,15 @@ the shared OS pointer is not already at the reader's position (correct for
 concurrent readers, no redundant seek for sequential reads). `last_pos` is
 initialized to a sentinel so the first read always seeks (a duplicated handle
 shares the OS pointer with the original, which `read_central_dir` has moved).
+
+P2 result (this run): Rust read_random = ~312 MiB/s (median, up from ~308;
+C ~291-324, Rust now at/above C); read_full = ~4907 MiB/s (no regression vs
+~4890 baseline).
+
+P2 approach: `Decoder::new` (and `decode_slice_into`) now size the flate2
+`BufReader` to the entry's compressed size, capped at the 8 KiB default
+(`(comp_size as usize).clamp(1, 8192)`), instead of always allocating a full
+8 KiB buffer per entry. Tiny entries (the read_random workload, ~512 B..=4 KiB)
+allocate only what they need; large entries keep the 8 KiB buffer, so read_full
+throughput is unchanged. Correctness is unaffected (a smaller buffer merely
+means more underlying reads); CRC/size verification is untouched.

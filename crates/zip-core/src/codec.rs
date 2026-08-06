@@ -36,7 +36,16 @@ impl Decoder {
         match method {
             CompressionMethod::Store => Ok(Decoder::Store(take)),
             CompressionMethod::Deflate => {
-                let dec = flate2::bufread::DeflateDecoder::new(BufReader::new(take));
+                // P2: size the read buffer to the entry's compressed size
+                // (capped at the 8 KiB default) instead of always allocating a
+                // full 8 KiB buffer per entry. Tiny entries (the read_random
+                // workload, ~512 B..=4 KiB) allocate only what they need;
+                // large entries keep the 8 KiB buffer, so read_full throughput
+                // is unchanged. Correctness is unaffected: a smaller buffer
+                // merely means more underlying reads.
+                let cap = (comp_size as usize).clamp(1, 8192);
+                let dec =
+                    flate2::bufread::DeflateDecoder::new(BufReader::with_capacity(cap, take));
                 Ok(Decoder::Deflate(dec))
             }
             CompressionMethod::Bzip2 => Ok(Decoder::Bzip2(bzip2_rs::DecoderReader::new(take))),
@@ -88,7 +97,11 @@ pub fn decode_slice_into(
             std::io::copy(&mut bounded.take(comp_size).take(limit), out).map_err(io_to_zip)?
         }
         CompressionMethod::Deflate => {
-            let dec = flate2::bufread::DeflateDecoder::new(BufReader::new(bounded.take(comp_size)));
+            let cap = (comp_size as usize).clamp(1, 8192);
+            let dec = flate2::bufread::DeflateDecoder::new(BufReader::with_capacity(
+                cap,
+                bounded.take(comp_size),
+            ));
             std::io::copy(&mut dec.take(limit), out).map_err(io_to_zip)?
         }
         CompressionMethod::Bzip2 => {
