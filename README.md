@@ -3,9 +3,9 @@
 **A from-scratch, memory-safe Rust reimplementation of [libzip](https://libzip.org/), drop-in ABI-compatible at the `zip_*` boundary** — read, create, and modify ZIP archives in pure safe Rust, with a `zip-sys` cdylib for existing C consumers.
 
 [![CI — 3 OS](https://img.shields.io/github/actions/workflow/status/kutaygunal/kzip/ci.yml?label=CI%20%283-OS%29&logo=github)](https://github.com/kutaygunal/kzip/actions/workflows/ci.yml)
-[![crates.io](https://img.shields.io/crates/v/kzip.svg)](https://crates.io/crates/kzip)
 [![docs.rs](https://img.shields.io/docsrs/kzip)](https://docs.rs/kzip)
-[![License](https://img.shields.io/github/license/kutaygunal/kzip)](LICENSE)
+[![Documentation](https://img.shields.io/badge/docs-mdBook-8A2BE2.svg)](https://kutaygunal.github.io/kzip/)
+[![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD--3--Clause-blue.svg)](LICENSE)
 [![MSRV 1.75](https://img.shields.io/badge/MSRV-1.75-blue)](#build--test)
 [![Stars](https://img.shields.io/github/stars/kutaygunal/kzip?style=social)](https://github.com/kutaygunal/kzip)
 

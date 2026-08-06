@@ -9,6 +9,32 @@ Legend:
   implemented.
 - **DEFERRED** — not yet exported; planned for a later phase.
 
+## Building & linking the cdylib
+
+Build the C ABI as a shared library:
+
+```sh
+cargo build --release -p zip-sys
+```
+
+The crate is `crate-type = ["cdylib", "rlib"]`, so it emits a platform shared library
+named after the crate (`zip-sys.dll` on Windows, `libzip_sys.so` on Linux, …) in
+`target/release/`. Release bundles rename it to `kzip.dll` (Windows) / `libkzip.so` with
+`kzip.h` and the `kzipcmp` tool — see `release.toml` and the `release/` directory.
+
+Link a C program against it with the generated header:
+
+```sh
+cc app.c -L target/release -lzip_sys -o app
+```
+
+(On Windows with MSVC, link `zip_sys.dll`'s import lib and drop the DLL next to the exe;
+no Rust toolchain is required on the consumer side.) A complete C example using the
+`zip_*` API appears in the [README](https://github.com/kutaygunal/kzip#quickstart--cli--c-abi).
+
+The header is generated with `scripts/gen-zip-h.sh` (requires `cargo install cbindgen`) and
+committed at `crates/zip-sys/include/zip.h` as the source of truth.
+
 ## Read path (Phase 4) — COMPLETE
 
 | Symbol                | Status    | Notes |

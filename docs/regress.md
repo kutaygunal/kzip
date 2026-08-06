@@ -12,6 +12,25 @@ tests and verify parity via the differential harness.
 the JSON. This is the strongest equivalence proof for the read subset and
 subsumes many regress read cases.
 
+## `run-verify.sh` (full verification vs libzip 1.11.4)
+
+`bash run-verify.sh` is the canonical equivalence driver against C libzip
+**1.11.4**. It builds the differential harness + cdylib, generates a deterministic
+corpus with the C write API, runs the extended read-path harness against *both*
+C `libs/c/zip.dll` and Rust `target/release/zip.dll`, diffs the JSON, and runs the
+write-path cross-read check:
+
+- `results/verify-read.json` / `verify-read-rust.json` — C and Rust read results
+- `results/verify-read.diff` — the byte-diff (must be empty for a PASS)
+- `results/verify-crossread.json` — write-path cross-read result
+- `results/verification-report.md` — the full report
+
+Run it after any core change:
+
+```sh
+bash run-verify.sh
+```
+
 ## Ported to native Rust tests
 
 | libzip regress family | Ported test(s) |

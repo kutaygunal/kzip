@@ -29,6 +29,10 @@ Targets exercised in CI (`cargo test --workspace` on `ubuntu-latest`,
 | x86_64 Windows | ✅ tested (MSVC) | C baseline built with MSVC 2022 |
 | Other targets | ⚠️ best-effort | must pass `#![deny(unsafe_code)]` gate (core is portable) |
 
+> **Windows release artifacts:** the packaged bundle ships `kzip.dll` (the `zip-sys`
+> cdylib), `kzip.h` (generated header), and `kzipcmp.exe` (the `ziptools` `zipcmp` port)
+> under `release/kzip-<ver>-windows-x86_64/` (see `release.toml` and `docs/msrv.md`).
+
 ## MSRV
 
 - **Minimum supported Rust version: 1.75** (`rust-version = "1.75"` in the
