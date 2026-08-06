@@ -6,8 +6,9 @@
 //! stored data**. The intact local-header + compressed-data region is copied
 //! verbatim; only the central directory and EOCD are re-serialized.
 //!
-//! ZIP64 archives are not yet supported by the writer and return
-//! [`ZipErrorCode::Opnotsupp`] (a later phase adds ZIP64).
+//! ZIP64 archives are supported: the serializer re-emits the ZIP64 EOCD +
+//! locator and per-entry ZIP64 extra fields as needed (see
+//! [`CentralDir::serialize`]).
 
 use crate::cdir::{read_central_dir, CentralDir};
 use crate::error::{Result, ZipError, ZipErrorCode};
@@ -27,9 +28,8 @@ use std::path::Path;
 /// by the re-serialized central directory (modified/trimmed entries, correct
 /// entry counts) and a fresh EOCD.
 ///
-/// Returns [`ZipErrorCode::Opnotsupp`] for a ZIP64 archive, and
-/// [`ZipErrorCode::Incons`] if the central directory region is out of bounds,
-/// so a malformed input can never produce a corrupt archive.
+/// Returns [`ZipErrorCode::Incons`] if the central directory region is out of
+/// bounds, so a malformed input can never produce a corrupt archive.
 pub fn modify_archive(
     bytes: &[u8],
     renames: &[(u64, String)],
@@ -40,11 +40,6 @@ pub fn modify_archive(
     let mut src: Box<dyn Source> = Box::new(Cursor::new(bytes.to_vec()));
     let cd = read_central_dir(&mut src)?;
 
-    // ZIP64 writing is unsupported; reject cleanly (M4 adds it).
-    if cd.is_zip64 {
-        return Err(ZipError::new(ZipErrorCode::Opnotsupp));
-    }
-
     let cdir_offset = cd.cdir_offset;
     let cdir_size = cd.cdir_size;
 
@@ -52,7 +47,9 @@ pub fn modify_archive(
     // the EOCD is inconsistent and we must not emit a corrupt archive.
     if cdir_offset > bytes.len() as u64
         || cdir_size > bytes.len() as u64
-        || cdir_offset + cdir_size > bytes.len() as u64
+        || cdir_offset
+            .checked_add(cdir_size)
+            .map_or(true, |end| end > bytes.len() as u64)
     {
         return Err(ZipError::new(ZipErrorCode::Incons));
     }
@@ -87,7 +84,7 @@ pub fn modify_archive(
     let new_cd = CentralDir {
         entries,
         comment: cd.comment.clone(),
-        is_zip64: false,
+        is_zip64: cd.is_zip64,
         cdir_size,
         cdir_offset,
     };
@@ -129,8 +126,8 @@ pub fn modify_archive(
 /// a fully-parsed, consistent archive and written at the recorded offset, the
 /// archive either gains a correct new tail or fails cleanly.
 ///
-/// ZIP64 archives are not yet supported by the writer and return
-/// [`ZipErrorCode::Opnotsupp`] (M4 adds ZIP64), without modifying the file.
+/// ZIP64 archives are supported: the serializer re-emits the ZIP64 EOCD +
+/// locator and per-entry ZIP64 extra fields as needed.
 pub fn modify_archive_file(
     path: &Path,
     renames: &[(u64, String)],
@@ -155,10 +152,20 @@ pub fn modify_archive_file(
     let mut src: Box<dyn Source> = Box::new(reader);
     let cd = read_central_dir(&mut src)?;
 
-    // ZIP64 writing is unsupported; reject cleanly (M4 adds it). Nothing has
-    // been written, so the file is still untouched.
-    if cd.is_zip64 {
-        return Err(ZipError::new(ZipErrorCode::Opnotsupp));
+    // Malformed-input guard: the central-directory region must lie wholly
+    // within the on-disk file, otherwise the EOCD is inconsistent and writing
+    // would corrupt the archive. Nothing has been written yet.
+    let file_len = file
+        .metadata()
+        .map_err(|e| ZipError::with_system(ZipErrorCode::Seek, e))?
+        .len();
+    if cd.cdir_offset > file_len
+        || cd.cdir_size > file_len
+        || cd.cdir_offset
+            .checked_add(cd.cdir_size)
+            .map_or(true, |end| end > file_len)
+    {
+        return Err(ZipError::new(ZipErrorCode::Incons));
     }
 
     let cdir_offset = cd.cdir_offset;
@@ -189,7 +196,7 @@ pub fn modify_archive_file(
     let new_cd = CentralDir {
         entries,
         comment: cd.comment.clone(),
-        is_zip64: false,
+        is_zip64: cd.is_zip64,
         cdir_size: cd.cdir_size,
         cdir_offset,
     };
@@ -440,16 +447,13 @@ mod tests {
         }
     }
 
-    #[test]
-    fn modify_archive_rejects_zip64_as_unsupported() {
-        // Build a plain archive, then force the reader to treat it as ZIP64 by
-        // fabricating a ZIP64 EOCD locator + EOCD before a 32-bit EOCD. Simpler:
-        // construct an archive whose EOCD is preceded by a ZIP64 EOCD locator.
+    /// Build a synthetic ZIP64 archive in memory by wrapping a plain archive's
+    /// data region + central directory in a ZIP64 EOCD record + locator, with
+    /// the regular EOCD carrying the 0xFFFF sentinel counts.
+    fn build_synthetic_zip64_archive() -> Vec<u8> {
+        use crate::constant::magic;
         let base = build_corpus();
         let mut bytes = Vec::new();
-        // Real ZIP64 EOCD + locator. We need read_central_dir to set is_zip64.
-        // Place a valid ZIP64 EOCD record and locator immediately before the
-        // regular EOCD of `base`. Reuse base's EOCD fields.
         let mut src: Box<dyn Source> = Box::new(Cursor::new(base.clone()));
         let cd = read_central_dir(&mut src).unwrap();
         assert!(!cd.is_zip64);
@@ -461,8 +465,8 @@ mod tests {
         // central directory verbatim.
         let cd_region = cdir_offset as usize..(cdir_offset + cdir_size) as usize;
         bytes.extend_from_slice(&base[cd_region]);
-        // ZIP64 EOCD record (44-byte minimum).
-        bytes.extend_from_slice(&crate::constant::magic::EOCD64);
+        // ZIP64 EOCD record (44-byte payload).
+        bytes.extend_from_slice(&magic::EOCD64);
         bytes.extend_from_slice(&44u64.to_le_bytes()); // size of record
         bytes.extend_from_slice(&0u16.to_le_bytes()); // version made by
         bytes.extend_from_slice(&45u16.to_le_bytes()); // version needed
@@ -473,13 +477,12 @@ mod tests {
         bytes.extend_from_slice(&cdir_size.to_le_bytes()); // cdir size
         bytes.extend_from_slice(&cdir_offset.to_le_bytes()); // cdir offset
         // ZIP64 EOCD locator (20 bytes).
-        bytes.extend_from_slice(&crate::constant::magic::EOCD64_LOCATOR);
+        bytes.extend_from_slice(&magic::EOCD64_LOCATOR);
         bytes.extend_from_slice(&0u32.to_le_bytes()); // disk with zip64 eocd
-        let zip64_eocd_offset = cdir_offset + cdir_size;
-        bytes.extend_from_slice(&zip64_eocd_offset.to_le_bytes());
+        bytes.extend_from_slice(&(cdir_offset + cdir_size).to_le_bytes());
         bytes.extend_from_slice(&1u32.to_le_bytes()); // total disks
         // Regular 32-bit EOCD with zip64 sentinel counts.
-        bytes.extend_from_slice(&crate::constant::magic::EOCD);
+        bytes.extend_from_slice(&magic::EOCD);
         bytes.extend_from_slice(&0u16.to_le_bytes());
         bytes.extend_from_slice(&0u16.to_le_bytes());
         bytes.extend_from_slice(&0xFFFFu16.to_le_bytes()); // disk entries
@@ -487,13 +490,155 @@ mod tests {
         bytes.extend_from_slice(&0xFFFFFFFFu32.to_le_bytes()); // cdir size
         bytes.extend_from_slice(&0xFFFFFFFFu32.to_le_bytes()); // cdir offset
         bytes.extend_from_slice(&0u16.to_le_bytes()); // comment len
+        bytes
+    }
 
-        // Sanity: reader reports zip64.
-        let mut s: Box<dyn Source> = Box::new(Cursor::new(bytes.clone()));
-        assert!(read_central_dir(&mut s).unwrap().is_zip64);
+    /// ZIP64 archives must be modifiable (M4 replaces the old "rejects as
+    /// unsupported" behaviour): modify_archive on a ZIP64 archive re-emits the
+    /// ZIP64 EOCD + locator and reopens with the renamed/deleted entries.
+    #[test]
+    fn modify_archive_zip64_roundtrip() {
+        let bytes = build_synthetic_zip64_archive();
+        let mut src: Box<dyn Source> = Box::new(Cursor::new(bytes.clone()));
+        let orig = read_central_dir(&mut src).unwrap();
+        assert!(orig.is_zip64, "synthetic archive must parse as ZIP64");
+        let orig_count = orig.entries.len();
+        let data_end = orig.cdir_offset as usize;
 
-        // modify_archive must reject it as unsupported, not corrupt it.
-        let err = modify_archive(&bytes, &[], &[]).unwrap_err();
-        assert_eq!(err.code(), ZipErrorCode::Opnotsupp);
+        // Rename index 0, delete index 1.
+        let out = modify_archive(
+            &bytes,
+            &[(0, "renamed_a.txt".to_string())],
+            &[1],
+        )
+        .unwrap();
+
+        // Output must still parse as ZIP64.
+        let mut s2: Box<dyn Source> = Box::new(Cursor::new(out.clone()));
+        let cd = read_central_dir(&mut s2).unwrap();
+        assert!(cd.is_zip64, "modified ZIP64 archive must stay ZIP64");
+        assert_eq!(cd.entries.len(), orig_count - 1);
+
+        // Data region unchanged.
+        assert_eq!(cd.cdir_offset as usize, data_end);
+        assert_eq!(&out[..data_end], &bytes[..data_end]);
+
+        // Renamed entry readable under the new name with identical content.
+        let expected = read_entry(&bytes, "a.txt").unwrap();
+        assert_content(&out, "renamed_a.txt", &expected);
+        assert!(read_entry(&out, "a.txt").is_none());
+        assert!(read_entry(&out, "b.bin").is_none(), "deleted entry absent");
+        assert_content(&out, "keep/me.dat", &expected_for("keep/me.dat", &bytes));
+    }
+
+    /// A Dirent whose offset exceeds 4 GiB must get a per-entry ZIP64 extra
+    /// field (0x0001) and a ZIP64 EOCD when serialized, not a silent truncation.
+    #[test]
+    fn modify_archive_overflow_emits_zip64() {
+        use crate::constant::{magic, EXTRA_FIELD_ZIP64};
+        let base = build_corpus();
+        let mut src: Box<dyn Source> = Box::new(Cursor::new(base.clone()));
+        let cd = read_central_dir(&mut src).unwrap();
+
+        // Bump the second entry's offset past 4 GiB and the archive's cdir
+        // offset past 4 GiB (a synthetic >4 GiB layout).
+        let big_offset = 0x1_0000_0000u64 + 100; // 4 GiB + 100
+        let mut entries = cd.entries;
+        entries[1].offset = big_offset;
+        let synthetic = CentralDir {
+            is_zip64: true,
+            cdir_offset: 0x1_0000_0000u64,
+            cdir_size: cd.cdir_size,
+            entries,
+            comment: String::new(),
+        };
+
+        let ser = synthetic.serialize().unwrap();
+
+        // The overflowing entry's central record carries a 0x0001 ZIP64 extra
+        // field (the true 64-bit offset) rather than a silently truncated one.
+        let mut pos = 0usize;
+        let mut found_zip64_ef = false;
+        let mut found_zip64_eocd = false;
+        while pos + 4 <= ser.len() {
+            if ser[pos..pos + 4] == magic::CENTRAL {
+                // Central record fixed layout (relative to the 4-byte magic):
+                // filename_len at [28..30], extra_len at [30..32], offset at
+                // [42..46]. Extra data follows the 46-byte fixed part + name.
+                let name_len =
+                    u16::from_le_bytes([ser[pos + 28], ser[pos + 29]]) as usize;
+                let extra_len =
+                    u16::from_le_bytes([ser[pos + 30], ser[pos + 31]]) as usize;
+                let extra_start = pos + 46 + name_len;
+                let extra = &ser[extra_start..extra_start + extra_len];
+                let mut i = 0;
+                while i + 4 <= extra.len() {
+                    let id = u16::from_le_bytes([extra[i], extra[i + 1]]);
+                    let len = u16::from_le_bytes([extra[i + 2], extra[i + 3]]) as usize;
+                    if id == EXTRA_FIELD_ZIP64 && len >= 8 {
+                        let off =
+                            u64::from_le_bytes(extra[i + 4..i + 12].try_into().unwrap());
+                        if off == big_offset {
+                            found_zip64_ef = true;
+                        }
+                    }
+                    i += 4 + len;
+                }
+                pos += 46 + name_len + extra_len;
+            } else if ser[pos..pos + 4] == magic::EOCD64 {
+                found_zip64_eocd = true;
+                break;
+            } else {
+                // skip a byte to resync
+                pos += 1;
+            }
+        }
+        assert!(found_zip64_ef, "overflowing entry must carry a 0x0001 ZIP64 EF");
+        assert!(found_zip64_eocd, "serialized overflow must emit a ZIP64 EOCD");
+    }
+
+    /// Helper: read an entry's contents or panic with a clear message.
+    fn expected_for(name: &str, bytes: &[u8]) -> Vec<u8> {
+        read_entry(bytes, name).unwrap_or_else(|| panic!("entry {name} missing"))
+    }
+
+    /// Garbage bytes must yield an error (not panic) from modify_archive.
+    #[test]
+    fn modify_archive_garbage_returns_error_no_panic() {
+        let garbage = b"this is definitely not a zip archive, just text bytes".to_vec();
+        let res = modify_archive(&garbage, &[], &[]);
+        assert!(res.is_err(), "garbage must not be silently accepted");
+    }
+
+    /// A truncated (cut-off) archive must yield an error (not panic) and a
+    /// garbage/absent file must leave the on-disk file unchanged on error.
+    #[test]
+    fn modify_archive_file_truncated_no_corrupt() {
+        // A truncated zip: valid local header + some data, no EOCD.
+        let truncated = {
+            let full = build_corpus();
+            let cut = full.len() - 40;
+            full[..cut].to_vec()
+        };
+        let path = std::env::temp_dir().join(format!(
+            "zipcore_modify_truncated_{}.zip",
+            std::process::id()
+        ));
+        std::fs::write(&path, &truncated).unwrap();
+        let res = modify_archive_file(&path, &[], &[]);
+        assert!(res.is_err(), "truncated archive must be rejected");
+        // The file must be byte-identical after the failed modify.
+        assert_eq!(std::fs::read(&path).unwrap(), truncated);
+        std::fs::remove_file(&path).ok();
+
+        // Absent file: must error, and (trivially) no file is created.
+        let absent = std::env::temp_dir().join(format!(
+            "zipcore_modify_absent_{}.zip",
+            std::process::id()
+        ));
+        std::fs::remove_file(&absent).ok();
+        let res = modify_archive_file(&absent, &[], &[]);
+        assert!(res.is_err(), "absent file must be rejected");
+        assert!(!absent.exists(), "must not create a file on error");
     }
 }

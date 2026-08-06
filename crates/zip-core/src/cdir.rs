@@ -30,31 +30,98 @@ pub struct CentralDir {
 
 impl CentralDir {
     /// Serialize the central directory: every per-entry record (via
-    /// [`Dirent::to_central_record`]) followed by the EOCD record.
+    /// [`Dirent::to_central_record`]) followed by the EOCD record, and — when
+    /// the archive is ZIP64 (`is_zip64`) or when the entry count, central-
+    /// directory size/offset, or any per-entry size/offset overflows its 32-bit
+    /// field — the per-entry ZIP64 extra fields (already emitted by
+    /// [`Dirent::to_central_record`]), a ZIP64 EOCD record, a ZIP64 EOCD
+    /// locator, and a sentinel-marker regular EOCD, per the ZIP64 spec.
     ///
     /// The EOCD's `cdir_size` is the sum of the per-entry records and its
     /// `cdir_offset` is this archive's recorded [`CentralDir::cdir_offset`]; the
-    /// entry count comes from `self.entries`. ZIP64 archives are not yet
-    /// supported by the writer (added in a later phase) and return an
-    /// "operation not supported" error.
+    /// entry count comes from `self.entries`. The non-ZIP64 output is
+    /// byte-identical to the previous serializer.
     pub fn serialize(&self) -> Result<Vec<u8>> {
-        if self.is_zip64 {
-            return Err(ZipError::new(ZipErrorCode::Opnotsupp));
-        }
-        let mut out = Vec::new();
+        let mut cdir = Vec::new();
         for e in &self.entries {
-            out.extend_from_slice(&e.to_central_record()?);
+            cdir.extend_from_slice(&e.to_central_record()?);
         }
-        let cdir_size = out.len() as u64;
-        write_eocd(
-            self.entries.len() as u16,
-            cdir_size,
-            self.cdir_offset,
-            self.comment.as_bytes(),
-            &mut out,
-        );
+        let cdir_size = cdir.len() as u64;
+        let num_entries = self.entries.len() as u64;
+
+        // ZIP64 is required if the archive is marked ZIP64, or if any quantity
+        // that must fit a 32/16-bit field would overflow.
+        let need_zip64 = self.is_zip64
+            || num_entries > u16::MAX as u64
+            || cdir_size > u32::MAX as u64
+            || self.cdir_offset > u32::MAX as u64
+            || self.entries.iter().any(|e| e.needs_zip64());
+
+        let mut out =
+            Vec::with_capacity(cdir_size as usize + size::EOCD + size::EOCD64 + size::EOCD64_LOCATOR);
+        out.extend_from_slice(&cdir);
+
+        if need_zip64 {
+            // Layout: [central dir][ZIP64 EOCD][ZIP64 locator][regular EOCD].
+            // The ZIP64 EOCD record sits immediately after the central dir.
+            let zip64_eocd_offset = self.cdir_offset + cdir_size;
+            write_eocd64(num_entries, cdir_size, self.cdir_offset, &mut out);
+            write_eocd64_locator(zip64_eocd_offset, &mut out);
+            write_eocd_zip64_sentinel(num_entries, self.comment.as_bytes(), &mut out);
+        } else {
+            write_eocd(
+                num_entries as u16,
+                cdir_size,
+                self.cdir_offset,
+                self.comment.as_bytes(),
+                &mut out,
+            );
+        }
         Ok(out)
     }
+}
+
+/// Serialize a ZIP64 EOCD record (`PK\x06\x06`, 56 bytes) into `out`. Layout
+/// offsets match the reader's [`read_eocd64`]: entries on this disk at
+/// [24:32], total entries at [32:40], cdir size at [40:48], cdir offset at
+/// [48:56].
+fn write_eocd64(num_entries: u64, cdir_size: u64, cdir_offset: u64, out: &mut Vec<u8>) {
+    out.extend_from_slice(&magic::EOCD64);
+    out.extend_from_slice(&44u64.to_le_bytes()); // size of record excluding these 12 bytes
+    out.extend_from_slice(&45u16.to_le_bytes()); // version made by
+    out.extend_from_slice(&45u16.to_le_bytes()); // version needed
+    out.extend_from_slice(&0u32.to_le_bytes()); // number of this disk
+    out.extend_from_slice(&0u32.to_le_bytes()); // disk with the start of the cdir
+    out.extend_from_slice(&num_entries.to_le_bytes()); // entries on this disk
+    out.extend_from_slice(&num_entries.to_le_bytes()); // total entries
+    out.extend_from_slice(&cdir_size.to_le_bytes());
+    out.extend_from_slice(&cdir_offset.to_le_bytes());
+}
+
+/// Serialize a ZIP64 EOCD locator (`PK\x06\x07`, 20 bytes) into `out`, pointing
+/// at the ZIP64 EOCD record at absolute offset `zip64_eocd_offset`.
+fn write_eocd64_locator(zip64_eocd_offset: u64, out: &mut Vec<u8>) {
+    out.extend_from_slice(&magic::EOCD64_LOCATOR);
+    out.extend_from_slice(&0u32.to_le_bytes()); // disk with the ZIP64 EOCD
+    out.extend_from_slice(&zip64_eocd_offset.to_le_bytes());
+    out.extend_from_slice(&1u32.to_le_bytes()); // total number of disks
+}
+
+/// Serialize a regular EOCD whose fixed fields carry the ZIP64 sentinel markers
+/// (`0xFFFF` entry counts, `0xFFFFFFFF` cdir size/offset), used when a ZIP64
+/// EOCD record is present immediately before it. The archive comment lives only
+/// here (never in the ZIP64 records).
+fn write_eocd_zip64_sentinel(num_entries: u64, comment: &[u8], out: &mut Vec<u8>) {
+    let _ = num_entries; // sentinel 0xFFFF always represents the count here
+    out.extend_from_slice(&magic::EOCD);
+    out.extend_from_slice(&0u16.to_le_bytes()); // this disk
+    out.extend_from_slice(&0u16.to_le_bytes()); // disk with cdir
+    out.extend_from_slice(&0xFFFFu16.to_le_bytes()); // entries on this disk
+    out.extend_from_slice(&0xFFFFu16.to_le_bytes()); // total entries
+    out.extend_from_slice(&0xFFFFFFFFu32.to_le_bytes()); // cdir size sentinel
+    out.extend_from_slice(&0xFFFFFFFFu32.to_le_bytes()); // cdir offset sentinel
+    out.extend_from_slice(&(comment.len() as u16).to_le_bytes()); // comment len
+    out.extend_from_slice(comment);
 }
 
 /// Serialize an EOCD record into `out`. Shared with the compression write
@@ -323,7 +390,7 @@ fn source_len(src: &mut Box<dyn Source>) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::constant::{magic, size};
+    use crate::constant::{magic, size, EXTRA_FIELD_ZIP64};
     use std::io::Cursor;
 
     /// Build a minimal single-file archive in memory and return its bytes.
@@ -536,6 +603,107 @@ mod tests {
         let mut src: Box<dyn Source> = Box::new(Cursor::new(vec![0u8; 16]));
         let err = read_entries(&mut src, 0, u32::MAX as u64, 1).unwrap_err();
         assert_eq!(err.code(), ZipErrorCode::CentralDirTooLarge);
+    }
+
+    /// A ZIP64 central directory serializes with a ZIP64 EOCD + locator and a
+    /// sentinel regular EOCD, and re-parses with `is_zip64` and the same entry
+    /// set (round-trip through the reader), when placed back over its data
+    /// region as a complete archive.
+    #[test]
+    fn serialize_zip64_roundtrip() {
+        let (bytes, _, _) = build_corpus_archive();
+        let mut src: Box<dyn Source> = Box::new(Cursor::new(bytes.clone()));
+        let cd = read_central_dir(&mut src).unwrap();
+        assert!(!cd.is_zip64);
+
+        let zip64 = CentralDir {
+            is_zip64: true,
+            ..cd.clone()
+        };
+        let ser = zip64.serialize().unwrap();
+
+        // Layout: [records][ZIP64 EOCD (56)][locator (20)][regular EOCD (22)].
+        assert!(ser.len() > cd.cdir_size as usize + size::EOCD);
+        // The ZIP64 EOCD locator is present immediately before the regular EOCD.
+        let tail = &ser[ser.len() - (size::EOCD64_LOCATOR + size::EOCD)..];
+        assert_eq!(&tail[..4], magic::EOCD64_LOCATOR);
+        assert_eq!(&tail[4 + 16..4 + 16 + 4], magic::EOCD);
+
+        // Re-read as a complete archive: data region + serialized CD+EOCD.
+        let mut full = bytes[..cd.cdir_offset as usize].to_vec();
+        full.extend_from_slice(&ser);
+        let mut s2: Box<dyn Source> = Box::new(Cursor::new(full));
+        let re = read_central_dir(&mut s2).unwrap();
+        assert!(re.is_zip64);
+        assert_eq!(re.entries.len(), cd.entries.len());
+        assert_eq!(re.entries[0].filename, cd.entries[0].filename);
+    }
+
+    /// A Dirent whose offset overflows 32 bits must serialize with a `0x0001`
+    /// ZIP64 extra field carrying the true 64-bit offset (never a silent
+    /// truncation), and the enclosing archive must emit a ZIP64 EOCD.
+    #[test]
+    fn overflow_dirent_serializes_zip64_not_truncated() {
+        let (bytes, _, _) = build_corpus_archive();
+        let mut src: Box<dyn Source> = Box::new(Cursor::new(bytes.clone()));
+        let cd = read_central_dir(&mut src).unwrap();
+
+        let big = 0x1_0000_0000u64 + 7; // > 4 GiB
+        let mut entries = cd.entries.clone();
+        entries[0].offset = big;
+        // A stale 0x0001 field must be dropped and regenerated exactly once.
+        entries[0]
+            .extra_fields
+            .push((EXTRA_FIELD_ZIP64, Vec::new()));
+
+        let zip64 = CentralDir {
+            is_zip64: false,
+            cdir_offset: 0x1_0000_0000u64,
+            cdir_size: cd.cdir_size,
+            entries,
+            comment: cd.comment.clone(),
+        };
+        let ser = zip64.serialize().unwrap();
+
+        // Overflow triggered ZIP64 emission even though is_zip64 was false.
+        let eocd64 = ser
+            .windows(4)
+            .position(|w| w == magic::EOCD64)
+            .expect("ZIP64 EOCD must be emitted");
+        assert!(eocd64 > 0);
+
+        // Parse the first central record directly from the bytes and verify the
+        // 32-bit offset field is the sentinel and a 0x0001 field carries `big`.
+        let rec_start = ser.windows(4).position(|w| w == magic::CENTRAL).unwrap();
+        let name_len = u16::from_le_bytes([ser[rec_start + 28], ser[rec_start + 29]]) as usize;
+        let offset32 = u32::from_le_bytes([
+            ser[rec_start + 42],
+            ser[rec_start + 43],
+            ser[rec_start + 44],
+            ser[rec_start + 45],
+        ]);
+        assert_eq!(offset32, 0xFFFFFFFF, "32-bit offset must be the sentinel");
+
+        let extra_len = u16::from_le_bytes([ser[rec_start + 30], ser[rec_start + 31]]) as usize;
+        let extra_start = rec_start + 46 + name_len;
+        let extra = &ser[extra_start..extra_start + extra_len];
+        let mut found = false;
+        let mut z64_fields = 0usize;
+        let mut i = 0;
+        while i + 4 <= extra.len() {
+            let id = u16::from_le_bytes([extra[i], extra[i + 1]]);
+            let len = u16::from_le_bytes([extra[i + 2], extra[i + 3]]) as usize;
+            if id == EXTRA_FIELD_ZIP64 {
+                z64_fields += 1;
+                let off = u64::from_le_bytes(extra[i + 4..i + 12].try_into().unwrap());
+                if off == big {
+                    found = true;
+                }
+            }
+            i += 4 + len;
+        }
+        assert_eq!(z64_fields, 1, "exactly one regenerated 0x0001 field");
+        assert!(found, "0x0001 field must carry the true 64-bit offset");
     }
 
     /// End-to-end: an archive whose EOCD claims `cdir_size = u32::MAX` is

@@ -231,14 +231,32 @@ impl Dirent {
         })
     }
 
+    /// Whether this entry needs ZIP64 semantics: any of `comp_size`,
+    /// `uncomp_size`, or `offset` overflows its 32-bit field, or `disk_number`
+    /// overflows its 16-bit field. When true, [`Dirent::to_central_record`]
+    /// writes the `0xFFFFFFFF` sentinels and carries the true 64-bit values in
+    /// a per-entry `0x0001` ZIP64 extra field.
+    pub fn needs_zip64(&self) -> bool {
+        self.comp_size > u32::MAX as u64
+            || self.uncomp_size > u32::MAX as u64
+            || self.offset > u32::MAX as u64
+            || self.disk_number > u16::MAX as u32
+    }
+
     /// Serialize this entry as a central-directory record, mirroring the
     /// write path's [`crate::compress::write_central_entry`] but starting from
     /// a parsed [`Dirent`]. Every field is preserved verbatim (flags, method,
     /// times, crc, sizes, filename, extra fields, comment, disk, attributes,
     /// offset) so the output is byte-identical to the record this entry was
-    /// parsed from. Fields that overflow their 32-bit representation
-    /// (`comp_size`, `uncomp_size`, `offset`) are written as the `0xFFFFFFFF`
-    /// sentinel exactly as the writer does.
+    /// parsed from.
+    ///
+    /// Fields that overflow their 32-bit representation (`comp_size`,
+    /// `uncomp_size`, `offset`) are written as the `0xFFFFFFFF` sentinel and
+    /// their true 64-bit values are carried in a freshly-built `0x0001` ZIP64
+    /// extra field (any stale `0x0001` field from the parse is dropped and
+    /// regenerated from the entry's 64-bit fields, so it always matches). When
+    /// no field overflows, the extra fields are preserved verbatim (so a
+    /// non-ZIP64 round-trip is byte-identical).
     pub fn to_central_record(&self) -> Result<Vec<u8>> {
         let aes = crate::crypto::is_aes_method(self.encryption_method);
         // On disk, a WinZip AES entry's method field is the special 99 value;
@@ -253,16 +271,10 @@ impl Dirent {
                 CompressionMethod::Unsupported(m) => m as u16,
             }
         };
-        let extra = serialize_extra_fields(&self.extra_fields)?;
-        let extra_len =
-            u16::try_from(extra.len()).map_err(|_| ZipError::new(ZipErrorCode::Eftoolarge))?;
-        let filename_len = u16::try_from(self.filename.len())
-            .map_err(|_| ZipError::new(ZipErrorCode::Eftoolarge))?;
-        let comment_len =
-            u16::try_from(self.comment.len()).map_err(|_| ZipError::new(ZipErrorCode::Eftoolarge))?;
 
-        // 0xFFFFFFFF sentinels for 32-bit-overflowed fields, matching the
-        // writer (ZIP64 extra-field reconstruction is a later phase).
+        // 0xFFFFFFFF sentinels for 32-bit-overflowed fields (0xFFFF for the
+        // 16-bit disk number). When nothing overflows the entry stays a plain
+        // 32-bit record.
         let comp32 = if self.comp_size > u32::MAX as u64 {
             ZIP64_MAGIC32
         } else {
@@ -278,6 +290,37 @@ impl Dirent {
         } else {
             self.offset as u32
         };
+        let disk16 = if self.disk_number > u16::MAX as u32 {
+            0xFFFF
+        } else {
+            self.disk_number as u16
+        };
+
+        let extra = if self.needs_zip64() {
+            // Drop any stale internal ZIP64 field and emit a fresh one that
+            // exactly matches this entry's current 64-bit sizes/offset/disk.
+            let filtered: Vec<ExtraField> = self
+                .extra_fields
+                .iter()
+                .filter(|(id, _)| *id != EXTRA_FIELD_ZIP64)
+                .cloned()
+                .collect();
+            let mut raw = serialize_extra_fields(&filtered)?;
+            if let Some(z64) =
+                build_zip64_extra(self.comp_size, self.uncomp_size, self.offset, self.disk_number)
+            {
+                raw.extend_from_slice(&z64);
+            }
+            raw
+        } else {
+            serialize_extra_fields(&self.extra_fields)?
+        };
+        let extra_len =
+            u16::try_from(extra.len()).map_err(|_| ZipError::new(ZipErrorCode::Eftoolarge))?;
+        let filename_len = u16::try_from(self.filename.len())
+            .map_err(|_| ZipError::new(ZipErrorCode::Eftoolarge))?;
+        let comment_len =
+            u16::try_from(self.comment.len()).map_err(|_| ZipError::new(ZipErrorCode::Eftoolarge))?;
 
         let mut out = Vec::new();
         out.extend_from_slice(&magic::CENTRAL);
@@ -293,7 +336,7 @@ impl Dirent {
         out.extend_from_slice(&filename_len.to_le_bytes());
         out.extend_from_slice(&extra_len.to_le_bytes()); // extra len
         out.extend_from_slice(&comment_len.to_le_bytes()); // comment len
-        out.extend_from_slice(&(self.disk_number as u16).to_le_bytes()); // disk number
+        out.extend_from_slice(&disk16.to_le_bytes()); // disk number
         out.extend_from_slice(&self.int_attrib.to_le_bytes()); // internal attrs
         out.extend_from_slice(&self.ext_attrib.to_le_bytes()); // external attrs
         out.extend_from_slice(&offset32.to_le_bytes());
@@ -519,6 +562,39 @@ fn parse_extra_fields(raw: &[u8]) -> Result<Vec<ExtraField>> {
         out.push((id, data));
     }
     Ok(out)
+}
+
+/// Build a per-entry `0x0001` ZIP64 extra-field record (id + length + data)
+/// carrying the 64-bit values of any of `uncomp_size` / `comp_size` / `offset`
+/// that overflow their 32-bit field, and of `disk` if it overflows its 16-bit
+/// field, in the order the ZIP spec requires. Returns `None` when no field
+/// overflows.
+fn build_zip64_extra(comp_size: u64, uncomp_size: u64, offset: u64, disk: u32) -> Option<Vec<u8>> {
+    let need_uncomp = uncomp_size > u32::MAX as u64;
+    let need_comp = comp_size > u32::MAX as u64;
+    let need_offset = offset > u32::MAX as u64;
+    let need_disk = disk > u16::MAX as u32;
+    if !(need_uncomp || need_comp || need_offset || need_disk) {
+        return None;
+    }
+    let mut data = Vec::with_capacity(28);
+    if need_uncomp {
+        data.extend_from_slice(&uncomp_size.to_le_bytes());
+    }
+    if need_comp {
+        data.extend_from_slice(&comp_size.to_le_bytes());
+    }
+    if need_offset {
+        data.extend_from_slice(&offset.to_le_bytes());
+    }
+    if need_disk {
+        data.extend_from_slice(&disk.to_le_bytes());
+    }
+    let mut ef = Vec::with_capacity(data.len() + 4);
+    ef.extend_from_slice(&EXTRA_FIELD_ZIP64.to_le_bytes());
+    ef.extend_from_slice(&(data.len() as u16).to_le_bytes());
+    ef.extend_from_slice(&data);
+    Some(ef)
 }
 
 /// Returns the ZIP64 extra field data (ID 0x0001), if present.
