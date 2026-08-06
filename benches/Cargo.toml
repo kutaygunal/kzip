@@ -48,6 +48,10 @@ path = "src/bin/bench_modify.rs"
 name = "bench_memory"
 path = "src/bin/bench_memory.rs"
 
+[[bin]]
+name = "bench_tools"
+path = "src/bin/bench_tools.rs"
+
 [dev-dependencies]
 criterion.workspace = true
 

@@ -52,6 +52,34 @@ deterministic corpora (DEFLATE level 6, same machine, 24 logical CPUs).
 > Full methodology, per-workload detail, and raw data:
 > [results/benchmark-report.md](results/benchmark-report.md).
 
+### kzip vs other zip / compression tools
+
+Median timing on a **79.2 MiB** corpus (mix of compressible text + incompressible
+random data), 5 iterations, same machine. **ZIP-format tools** (kzip, 7-Zip,
+Info-ZIP) are directly comparable; **Zstandard** and **LZ4** use their own
+single-stream containers and are shown only as general-compression context.
+*Faster is better for time; lower ratio is better.*
+
+![Zip-tools compress throughput](docs/benchmarks/zip-tools-compress.png)
+
+![Zip-tools extract throughput](docs/benchmarks/zip-tools-extract.png)
+
+![Zip-tools compression ratio](docs/benchmarks/zip-tools-ratio.png)
+
+| tool | format | compress | extract | ratio | vs kzip (compress) |
+|------|--------|---------:|--------:|------:|-------------------:|
+| **kzip** (Rust) | ZIP | **44 ms** (1797 MiB/s) | 15 ms | 0.234 | 1.00× |
+| 7-Zip 26.02 | ZIP | 140 ms (564 MiB/s) | **6 ms** | 0.234 | 0.31× |
+| Info-ZIP zip 3.0 | ZIP | 595 ms (133 MiB/s) | 387 ms | 0.234 | 0.07× |
+| Zstandard 1.5.7* | ZSTD | 28 ms (2879 MiB/s) | 16 ms | 0.231 | 1.60× |
+| LZ4 1.10.0* | LZ4 | 43 ms (1821 MiB/s) | 22 ms | 0.234 | 1.01× |
+
+\* non-ZIP single-stream containers — context only.
+
+In the ZIP format kzip compresses **~3× faster than 7-Zip** and far faster than
+Info-ZIP at an identical ratio; 7-Zip wins on **extract** speed. Full analysis and
+caveats: [results/zip-tools-benchmark.md](results/zip-tools-benchmark.md).
+
 ## Reports
 
 - 📊 **Benchmark report — C libzip vs Rust zip-core (HTML, self-contained):**
@@ -59,6 +87,8 @@ deterministic corpora (DEFLATE level 6, same machine, 24 logical CPUs).
   *(Markdown source: [results/benchmark-report.md](results/benchmark-report.md))*
 - ✅ **Equivalence verification report — C libzip vs Rust zip-core:**
   [results/verification-report.md](results/verification-report.md)
+- 📦 **Third-party zip-tools benchmark — kzip vs 7-Zip / Info-ZIP / zstd / lz4:**
+  [results/zip-tools-benchmark.md](results/zip-tools-benchmark.md)
 
 The benchmark report covers the §9.3 workload matrix (small / large / mixed
 compression, full-archive and random reads, modify-in-place, memory peak),
