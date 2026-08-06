@@ -11,7 +11,7 @@ use crate::constant::{
 use crate::crypto::aes_method_from_strength;
 use crate::error::{Result, ZipError, ZipErrorCode};
 use crate::reader;
-use std::io::{Cursor, Read, Seek};
+use std::io::{Cursor, Read, Seek, SeekFrom};
 
 /// An extra field record `(id, data)`.
 pub type ExtraField = (u16, Vec<u8>);
@@ -283,6 +283,41 @@ impl Dirent {
             },
             header_total,
         ))
+    }
+
+    /// Lightweight local-header skip for the read-open path.
+    ///
+    /// Reads only the fixed 30-byte local file header from `src` (positioned at
+    /// its `PK\x03\x04` magic), then seeks forward past the variable-length
+    /// filename and extra fields, returning the offset where the entry's data
+    /// begins. This mirrors libzip's `_zip_dirent_size` (which reads only the
+    /// fixed header) and avoids the per-entry heap allocations and extra-field
+    /// parsing that [`parse_local`] performs — the central directory already
+    /// carries the authoritative metadata, so the local header only needs to be
+    /// skipped, not fully decoded.
+    pub fn local_header_len(src: &mut (impl Read + Seek)) -> Result<u64> {
+        let mut raw = [0u8; size::LOCAL];
+        reader::read_exact(src, &mut raw)?;
+        if raw[0..4] != magic::LOCAL {
+            return Err(ZipError::new(ZipErrorCode::Nozip));
+        }
+        let mut c = Cursor::new(&raw[4..]);
+        // Fixed fields: version_needed(2) bitflags(2) method(2) time(2) date(2)
+        // crc(4) comp_size(4) uncomp_size(4) = 22 bytes, then the two
+        // variable-length sizes we actually need.
+        let _ = read16(&mut c); // version_needed
+        let _ = read16(&mut c); // bitflags
+        let _ = read16(&mut c); // comp_method
+        let _ = read16(&mut c); // last_mod_time
+        let _ = read16(&mut c); // last_mod_date
+        let _ = read32(&mut c); // crc
+        let _ = read32(&mut c); // comp_size
+        let _ = read32(&mut c); // uncomp_size
+        let filename_len = read16(&mut c) as u64;
+        let extra_len = read16(&mut c) as u64;
+        // Seek past the filename + extra fields to the data start.
+        src.seek(SeekFrom::Current((filename_len + extra_len) as i64))
+            .map_err(|e| ZipError::with_system(ZipErrorCode::Seek, e))
     }
 }
 

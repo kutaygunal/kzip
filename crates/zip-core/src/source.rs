@@ -97,6 +97,20 @@ pub trait Source: Read + Seek + Send + Sync {
 
     /// Create an independent, freshly-positioned copy of this source.
     fn duplicate(&self) -> Result<Box<dyn Source>>;
+
+    /// Create an independent copy of this source positioned at `offset`.
+    ///
+    /// The default implementation calls [`duplicate`] (which positions the
+    /// clone at the start) and then seeks to `offset`. Sources that can clone
+    /// and seek in a single step (e.g. a `File`, where the wasted `seek(0)` in
+    /// [`duplicate`] is immediately overwritten by the caller) override this to
+    /// avoid the redundant syscall on the per-entry read-open path.
+    fn duplicate_at(&self, offset: u64) -> Result<Box<dyn Source>> {
+        let mut d = self.duplicate()?;
+        d.seek(SeekFrom::Start(offset))
+            .map_err(|e| ZipError::with_system(ZipErrorCode::Seek, e))?;
+        Ok(d)
+    }
 }
 
 impl Source for std::fs::File {
@@ -113,6 +127,18 @@ impl Source for std::fs::File {
         // OS file-position pointer, so the explicit seek is required to honor
         // the "positioned at the start" contract.
         f.seek(SeekFrom::Start(0))
+            .map_err(|e| ZipError::with_system(ZipErrorCode::Seek, e))?;
+        Ok(Box::new(f))
+    }
+
+    fn duplicate_at(&self, offset: u64) -> Result<Box<dyn Source>> {
+        let mut f = self
+            .try_clone()
+            .map_err(|e| ZipError::with_system(ZipErrorCode::Open, e))?;
+        // Clone + seek in one step: skip the redundant `seek(0)` that
+        // `duplicate()` performs and that the caller would immediately
+        // overwrite with `offset`.
+        f.seek(SeekFrom::Start(offset))
             .map_err(|e| ZipError::with_system(ZipErrorCode::Seek, e))?;
         Ok(Box::new(f))
     }

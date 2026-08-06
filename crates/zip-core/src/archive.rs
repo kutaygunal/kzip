@@ -17,7 +17,7 @@ use crate::error::{Result, ZipError, ZipErrorCode};
 use crate::file::EntryReader;
 use crate::reader;
 use crate::source::{Source, Stat};
-use std::io::{Read, SeekFrom};
+use std::io::Read;
 use std::sync::{Arc, Mutex};
 
 // Re-export the write-path progress/cancel polling API so it is reachable from
@@ -208,22 +208,26 @@ impl Archive {
         if d.comp_size > MAX_CD_SIZE {
             return Err(ZipError::new(ZipErrorCode::CentralDirTooLarge));
         }
-        let mut dup = self.src.duplicate()?;
-        dup.seek(SeekFrom::Start(d.offset))
-            .map_err(|e| ZipError::with_system(ZipErrorCode::Seek, e))?;
-        // Parse the local header; this advances to the data start.
-        Dirent::parse_local(&mut dup)?;
+        let mut dup = self.src.duplicate_at(d.offset)?;
+        // Lightweight local-header skip: read only the 30-byte fixed header,
+        // then seek past the filename + extra fields to the data start. This
+        // avoids the per-entry heap allocations and extra-field parsing of
+        // `parse_local` (the central directory already carries the metadata).
+        Dirent::local_header_len(&mut dup)?;
         let mut data = vec![0u8; d.comp_size as usize];
         reader::read_exact(&mut dup, &mut data)?;
         Ok(data)
     }
 
     fn open_dirent(&self, d: &Dirent, password: Option<&[u8]>) -> Result<EntryReader> {
-        let mut dup = self.src.duplicate()?;
-        dup.seek(SeekFrom::Start(d.offset))
-            .map_err(|e| ZipError::with_system(ZipErrorCode::Seek, e))?;
-        // Parse the local header; this also advances to the data start.
-        let (_local, _header_len) = Dirent::parse_local(&mut dup)?;
+        // Clone + seek in one step (avoids the redundant `seek(0)` that
+        // `duplicate()` performs and that we would immediately overwrite).
+        let mut dup = self.src.duplicate_at(d.offset)?;
+        // Lightweight local-header skip: read only the 30-byte fixed header,
+        // then seek past the filename + extra fields to the data start. This
+        // avoids the per-entry heap allocations and extra-field parsing of
+        // `parse_local` (the central directory already carries the metadata).
+        let data_offset = Dirent::local_header_len(&mut dup)?;
         let encrypted = d.bitflags & crate::constant::flag::ENCRYPTED != 0;
         let comp_size = d.comp_size;
         let uncomp_size = d.uncomp_size;
@@ -239,11 +243,10 @@ impl Archive {
             && !matches!(method, CompressionMethod::Unsupported(_))
             && uncomp_size <= ZERO_COPY_MAX_UNCOMP
         {
-            let pos = dup
-                .stream_position()
-                .map_err(|e| ZipError::with_system(ZipErrorCode::Tell, e))?
-                as usize;
+            // Only buffer-backed sources expose `as_slice()`; for a real
+            // `File` this is `None`, so we skip the tell syscall entirely.
             if let Some(slice) = dup.as_slice() {
+                let pos = data_offset as usize;
                 let end = (pos + comp_size as usize).min(slice.len());
                 if pos <= end {
                     let data = &slice[pos..end];
@@ -489,7 +492,7 @@ mod tests {
     use crate::compress::{write_archive, ArchiveFile, CompressOptions};
     use crate::constant::flag;
     use crate::constant::magic;
-    use std::io::{Cursor, Read};
+    use std::io::{Cursor, Read, SeekFrom};
 
     fn build_archive(filename: &str, content: &[u8]) -> Vec<u8> {
         let name = filename.as_bytes();
