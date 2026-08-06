@@ -35,6 +35,8 @@ deterministic corpora (DEFLATE level 6, same machine, 24 logical CPUs).
 
 ![Parallel compression speedup](docs/benchmarks/benchmark-parallel.png)
 
+![Modify in-place latency](docs/benchmarks/benchmark-modify.png)
+
 ![Memory footprint](docs/benchmarks/benchmark-memory.png)
 
 | Workload | C libzip 1.11.4 | kzip (Rust) | Ratio | Verdict |

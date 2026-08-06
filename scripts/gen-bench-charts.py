@@ -65,10 +65,7 @@ workloads = [
     ("mixed_serial", "Compress mixed\n(serial)"),
     ("read_full",    "Read full\narchive"),
     ("read_random",  "Read random\nentries"),
-    ("modify_inplace","Modify\nin place"),
 ]
-# Rust uses modify_rewrite for the modify workload
-rust_wl = {"modify_inplace": "modify_rewrite"}
 
 c_vals, r_vals = [], []
 for wl, _ in workloads:
@@ -76,15 +73,12 @@ for wl, _ in workloads:
                    or median_mibps(load(os.path.join(ROOT,"results","benchmark-large.csv")), "c_libzip", wl)
                    or median_mibps(load(os.path.join(ROOT,"results","benchmark-mixed.csv")), "c_libzip", wl)
                    or median_mibps(load(os.path.join(ROOT,"results","benchmark-read.csv")), "c_libzip", wl)
-                   or median_mibps(load(os.path.join(ROOT,"results","benchmark-random.csv")), "c_libzip", wl)
-                   or median_mibps(load(os.path.join(ROOT,"results","benchmark-modify.csv")), "c_libzip", wl))
-    rw = rust_wl.get(wl, wl)
-    r_vals.append(median_mibps(load(os.path.join(ROOT,"results","benchmark-small.csv")), "rust_zip_core", rw)
-                   or median_mibps(load(os.path.join(ROOT,"results","benchmark-large.csv")), "rust_zip_core", rw)
-                   or median_mibps(load(os.path.join(ROOT,"results","benchmark-mixed.csv")), "rust_zip_core", rw)
-                   or median_mibps(load(os.path.join(ROOT,"results","benchmark-read.csv")), "rust_zip_core", rw)
-                   or median_mibps(load(os.path.join(ROOT,"results","benchmark-random.csv")), "rust_zip_core", rw)
-                   or median_mibps(load(os.path.join(ROOT,"results","benchmark-modify.csv")), "rust_zip_core", rw))
+                   or median_mibps(load(os.path.join(ROOT,"results","benchmark-random.csv")), "c_libzip", wl))
+    r_vals.append(median_mibps(load(os.path.join(ROOT,"results","benchmark-small.csv")), "rust_zip_core", wl)
+                   or median_mibps(load(os.path.join(ROOT,"results","benchmark-large.csv")), "rust_zip_core", wl)
+                   or median_mibps(load(os.path.join(ROOT,"results","benchmark-mixed.csv")), "rust_zip_core", wl)
+                   or median_mibps(load(os.path.join(ROOT,"results","benchmark-read.csv")), "rust_zip_core", wl)
+                   or median_mibps(load(os.path.join(ROOT,"results","benchmark-random.csv")), "rust_zip_core", wl))
 
 fig, ax = plt.subplots(figsize=(11, 5.5), dpi=150)
 x = range(len(workloads))
@@ -134,16 +128,44 @@ c_read, r_read = median_rss("c_libzip", "memory_read"), median_rss("rust_zip_cor
 fig, ax = plt.subplots(figsize=(8, 5), dpi=150)
 labels = ["Compress", "Read"]
 x = range(2); w = 0.36
-b1 = ax.bar([i - w/2 for i in x], [c_comp, c_read], w, label="C libzip", color=C, zorder=3)
-b2 = ax.bar([i + w/2 for i in x], [r_comp, r_read], w, label="kzip (Rust)", color=RUST, zorder=3)
+b1 = ax.bar([i - w/2 for i in x], [(c_comp or 0)/2**20, (c_read or 0)/2**20], w, label="C libzip", color=C, zorder=3)
+b2 = ax.bar([i + w/2 for i in x], [(r_comp or 0)/2**20, (r_read or 0)/2**20], w, label="kzip (Rust)", color=RUST, zorder=3)
 ax.set_xticks(list(x)); ax.set_xticklabels(labels)
 ax.set_title("Memory footprint (RSS) — 10k-entry archive", fontsize=13, fontweight="bold", pad=12)
-style_ax(ax, "RSS (bytes)")
-add_labels(ax, b1, "{:.0f}")
-add_labels(ax, b2, "{:.0f}")
+style_ax(ax, "RSS (MiB)")
+add_labels(ax, b1, "{:.1f}")
+add_labels(ax, b2, "{:.1f}")
 ax.legend(frameon=False, fontsize=10)
 fig.tight_layout()
 fig.savefig(os.path.join(OUT, "benchmark-memory.png"))
+plt.close(fig)
+
+def median_seconds(rows, impl, workload):
+    vals = [float(r["seconds"]) for r in rows if r["impl"] == impl and r["workload"] == workload]
+    return statistics.median(vals) if vals else None
+
+# ---------- Chart 4: Modify in-place latency (ms) ----------
+mod = load(os.path.join(ROOT, "results", "benchmark-modify.csv"))
+c_mp   = median_seconds(mod, "c_libzip",     "modify_inplace")
+r_mrw  = median_seconds(mod, "rust_zip_core","modify_rewrite")
+r_mp   = median_seconds(mod, "rust_zip_core","modify_inplace")
+
+def _ms(sec):
+    return sec * 1000.0 if sec is not None else 0.0
+
+fig, ax = plt.subplots(figsize=(8, 5), dpi=150)
+labels = ["C libzip\n(in-place)", "kzip rewrite\n(recompress)", "kzip\n(in-place)"]
+vals_ms = [_ms(c_mp), _ms(r_mrw), _ms(r_mp)]
+colors = [C, "#9CA3AF", RUST]
+bars = ax.bar(labels, vals_ms, color=colors, width=0.55, zorder=3)
+ax.set_title("Modify in place (add/delete/rename) — median latency", fontsize=13, fontweight="bold", pad=12)
+style_ax(ax, "Latency (ms)")
+add_labels(ax, bars, "{:.2f}")
+if r_mp and c_mp:
+    ax.annotate(f"{_ms(c_mp)/_ms(r_mp):.1f}× faster", xy=(2, _ms(r_mp)), xytext=(1.15, _ms(c_mp)*1.1),
+                fontsize=10, color=RUST, fontweight="bold", arrowprops=dict(arrowstyle="->", color=RUST))
+fig.tight_layout()
+fig.savefig(os.path.join(OUT, "benchmark-modify.png"))
 plt.close(fig)
 
 print("Charts written to", OUT)
