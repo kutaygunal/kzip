@@ -25,6 +25,31 @@ equivalent** to C libzip (v1.11.4). Parallel compression is deterministic and
 outperforms the C single-threaded path on multi-file workloads; serial codec
 parity on mixed data is codec-backend-dependent (see the benchmark report).
 
+## Benchmarks
+
+Median throughput, **C libzip 1.11.4** vs **kzip (Rust)**, on identical
+deterministic corpora (DEFLATE level 6, same machine, 24 logical CPUs).
+*Higher is better.*
+
+![Throughput: C libzip vs kzip](docs/benchmarks/benchmark-throughput.png)
+
+![Parallel compression speedup](docs/benchmarks/benchmark-parallel.png)
+
+![Memory footprint](docs/benchmarks/benchmark-memory.png)
+
+| Workload | C libzip 1.11.4 | kzip (Rust) | Ratio | Verdict |
+|----------|-----------------|-------------|-------|---------|
+| Compress small (1–64 KiB) | 431.8 MiB/s | 644.1 MiB/s | **1.49×** | Rust faster |
+| Compress large (1 GiB) | 376.3 MiB/s | 873.8 MiB/s | **2.32×** | Rust faster |
+| Compress mixed (serial) | 382.8 MiB/s | 859.4 MiB/s | **2.24×** | Rust faster |
+| Compress mixed (**parallel**, 24) | — | 5987.9 MiB/s | **15.6×** vs C | Rust much faster |
+| Read full archive | 2230.6 MiB/s | 4745.4 MiB/s | **2.13×** | Rust faster |
+| Read random entries | 323.3 MiB/s | 255.9 MiB/s | 0.79× | C faster |
+| Modify in place | 8.95 ms | 9.15 ms | ~1.02× | parity |
+
+> Full methodology, per-workload detail, and raw data:
+> [results/benchmark-report.md](results/benchmark-report.md).
+
 ## Reports
 
 - 📊 **Benchmark report — C libzip vs Rust zip-core (HTML, self-contained):**
