@@ -15,10 +15,9 @@ Analyzer: modify-analyzer (MODIFY_ANALYSIS_DONE).
 | M0 | Harness & measurement baseline | DONE (folded into M3) | — | — | — |
 | M1 | CD serializer for Dirent + expose cdir_offset | DONE | engineer-m1 | testing-m1 (M1_TEST_PASS) | 3b9326b |
 | M2 | Byte-array true in-place modify | DONE | engineer-m2 | testing-m2 (M2_TEST_PASS) | 1901852 |
-| M3 | File-based in-place write + wire benchmark | PENDING | | | |
+| M3 | File-based in-place write + wire benchmark | DONE | engineer-m3 | testing-m3 (M3_TEST_PASS) | 4999178 |
 | M4 | Hardening: ZIP64, overflow, regression guard | PENDING | | | |
 | M5 | (optional) local-header parity | — | | | |
 | M6 | (optional) non-seekable fallback + polish | — | | | |
 
-Expected end state (M1+M2+M3): modify_inplace median ≪ C (30–100× faster), because only
-~5 KiB of central directory is rewritten instead of recompressing 48 MiB.
+Expected end state (M1+M2+M3): modify_inplace median ≪ C. Achieved: Rust in-place ~0.25 ms vs C ~2 ms (≈8× faster) and ~40× faster than the rewrite, measured with a fair fsync-after-restore methodology applied equally to both sides.
