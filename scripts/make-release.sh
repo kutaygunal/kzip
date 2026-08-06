@@ -23,7 +23,11 @@ cargo build --release --package zip-sys --package ziptools
 echo "== Packaging into $REL =="
 rm -rf "$REL" "$ZIP"
 mkdir -p "$REL"
-cp target/release/zip.dll target/release/zipcmp.exe crates/zip-sys/include/zip.h LICENSE README.md "$REL/"
+# kzip-branded release filenames (ABI symbols remain libzip-compatible zip_*).
+cp target/release/zip.dll "$REL/kzip.dll"
+cp target/release/zipcmp.exe "$REL/kzipcmp.exe"
+cp crates/zip-sys/include/zip.h "$REL/kzip.h"
+cp LICENSE README.md "$REL/"
 
 # Optional code-signing.
 if [ -n "${1:-}" ]; then

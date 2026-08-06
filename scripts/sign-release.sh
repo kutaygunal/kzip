@@ -52,12 +52,12 @@ sign() {
   fi
 }
 
-for bin in "$TARGET"/zip.dll "$TARGET"/zipcmp.exe; do
+for bin in "$TARGET"/kzip.dll "$TARGET"/kzipcmp.exe; do
   [ -f "$bin" ] && sign "$bin"
 done
 
 echo "== Verifying signatures =="
-"$SIGNTOOL" verify /pa /v "$TARGET"/zip.dll
-"$SIGNTOOL" verify /pa /v "$TARGET"/zipcmp.exe
+"$SIGNTOOL" verify /pa /v "$TARGET"/kzip.dll
+"$SIGNTOOL" verify /pa /v "$TARGET"/kzipcmp.exe
 
 echo "== Done. Signed binaries in: $TARGET =="

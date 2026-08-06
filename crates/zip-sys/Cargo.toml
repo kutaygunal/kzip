@@ -21,5 +21,8 @@ flate2.workspace = true
 crc32fast.workspace = true
 libloading.workspace = true
 
+[build-dependencies]
+winres = "0.1"
+
 [features]
 default = []
