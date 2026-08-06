@@ -1577,13 +1577,12 @@ pub unsafe extern "C" fn zip_fdopen(fd: c_int, flags: c_int, errorp: *mut c_int)
         let mut bytes = Vec::new();
         let mut buf = [0u8; 65536];
         loop {
-            let n = unsafe {
-                libc::read(
-                    dupfd,
-                    buf.as_mut_ptr().cast(),
-                    buf.len().try_into().unwrap(),
-                )
-            };
+            // `libc::read` takes `c_uint` on Windows but `size_t` on POSIX.
+            #[cfg(windows)]
+            let n =
+                unsafe { libc::read(dupfd, buf.as_mut_ptr().cast(), buf.len() as libc::c_uint) };
+            #[cfg(not(windows))]
+            let n = unsafe { libc::read(dupfd, buf.as_mut_ptr().cast(), buf.len()) };
             if n < 0 {
                 unsafe { libc::close(dupfd) };
                 return Err(ZipErrorCode::Read.as_i32());
