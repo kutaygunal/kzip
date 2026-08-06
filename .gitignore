@@ -46,3 +46,6 @@ results/verify-*.err
 # Internal orchestration/planning docs (not part of the released project)
 /ORCHESTRATION.md
 /PLAN.md
+
+# Local release packaging (uploaded to GitHub Releases, not committed)
+/release/
