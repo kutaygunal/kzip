@@ -42,3 +42,7 @@ results/verify-read-rust.json
 results/verify-crossread.json
 results/verify-read.diff
 results/verify-*.err
+
+# Internal orchestration/planning docs (not part of the released project)
+/ORCHESTRATION.md
+/PLAN.md
