@@ -299,10 +299,7 @@ fn main() {
             comp: bytes.len() as u64,
             ratio: bytes.len() as u64 as f64 / uncomp as f64,
         });
-        eprintln!(
-            "kzip extract: {:.1} MiB/s median",
-            mibps(uncomp, m)
-        );
+        eprintln!("kzip extract: {:.1} MiB/s median", mibps(uncomp, m));
     }
 
     // ================= 7-Zip (ZIP format) ====================================
@@ -341,7 +338,13 @@ fn main() {
             fs::create_dir_all(&ex_dir).unwrap();
             times.push(timed(
                 &sz_str,
-                &["x", "-y", "-o", ex_dir.to_str().unwrap(), &out.to_string_lossy()],
+                &[
+                    "x",
+                    "-y",
+                    "-o",
+                    ex_dir.to_str().unwrap(),
+                    &out.to_string_lossy(),
+                ],
                 &tmp,
             ));
         }
@@ -467,7 +470,12 @@ fn main() {
         let mut times = Vec::new();
         for _ in 0..ITERS {
             let _ = fs::remove_file(&out);
-            times.push(timed_stdout_file(&lz4_str, &["-c", &concat_str], &tmp, &out));
+            times.push(timed_stdout_file(
+                &lz4_str,
+                &["-c", &concat_str],
+                &tmp,
+                &out,
+            ));
         }
         let comp = fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
         let m = median(times);
@@ -545,9 +553,11 @@ fn main() {
         "**Iterations per tool:** {}, timing = **median**. kzip runs in-process (zip_core, DEFLATE **level 6**); CLI tools timed with wall-clock. ZIP-format tools (kzip, 7-Zip, Info-ZIP) are directly comparable; **Zstandard and LZ4 use their own single-stream containers and are shown ONLY as general compression context** - not a same-format comparison.\n\n",
         ITERS
     ));
-    md.push_str("> kzip compress uses the library default (`parallel: true`, one worker per core \
+    md.push_str(
+        "> kzip compress uses the library default (`parallel: true`, one worker per core \
                  across independent files). 7-Zip `-tzip` and Info-ZIP `zip` also compress \
-                 multiple files in parallel (7-Zip) or serially (Info-ZIP); see caveats.\n\n");
+                 multiple files in parallel (7-Zip) or serially (Info-ZIP); see caveats.\n\n",
+    );
 
     md.push_str("## Results\n\n");
     md.push_str(
