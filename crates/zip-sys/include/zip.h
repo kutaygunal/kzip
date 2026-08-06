@@ -24,8 +24,10 @@
  *   zip_file_extra_fields_count, zip_file_extra_fields_count_by_id,
  *   zip_file_extra_field_get, zip_file_extra_field_get_by_id
  *
- * STUBBED / DEFERRED (not yet exported): encryption, full zip_source_* streaming
- * API, progress/cancel, comment/extra-field WRITE, zip_unchange*. See docs/ABI.md.
+ * Also exported: encryption (zip_set_default_password, zip_file_set_encryption,
+ * zip_encryption_method_supported, zip_fopen_*_encrypted), streaming sources
+ * (zip_source_buffer / zip_source_free), and the write/edit path
+ * (zip_file_add, zip_dir_add, zip_delete, zip_rename, zip_file_replace).
  */
 #ifndef ZIP_H
 #define ZIP_H
