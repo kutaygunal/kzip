@@ -60,11 +60,11 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Mutex;
 
+use zip_core::constant::CompressionMethod;
 use zip_core::{
     write_archive, write_archive_full, write_archive_full_with_progress, Archive, ArchiveFile,
     CompressOptions, EntryReader, Stat, ZipErrorCode,
 };
-use zip_core::constant::CompressionMethod;
 
 // ---------------------------------------------------------------------------
 // libzip constants (from libzip/lib/zip.h) needed by the exported ABI.
@@ -72,6 +72,7 @@ use zip_core::constant::CompressionMethod;
 
 /// `zip_open` flags.
 const ZIP_CREATE: c_int = 1;
+#[allow(dead_code)]
 const ZIP_EXCL: c_int = 2;
 const ZIP_CHECKCONS: c_int = 4;
 const ZIP_TRUNCATE: c_int = 8;
@@ -90,8 +91,11 @@ const ZIP_ET_LIBZIP: c_int = 3;
 /// `zip_set_archive_flag`.
 const ZIP_AFL_RDONLY: c_int = 2;
 const ZIP_AFL_IS_TORRENTZIP: c_int = 4;
+#[allow(dead_code)]
 const ZIP_AFL_WANT_TORRENTZIP: c_int = 8;
+#[allow(dead_code)]
 const ZIP_AFL_CREATE_OR_KEEP_FILE_FOR_EMPTY_ARCHIVE: c_int = 16;
+#[allow(dead_code)]
 const ZIP_CM_LZMA: i32 = 14;
 
 /// `zip_fseek` whence values (POSIX).
@@ -99,9 +103,9 @@ const SEEK_SET: c_int = 0;
 const SEEK_CUR: c_int = 1;
 const SEEK_END: c_int = 2;
 
-/// Extra-field placement flags (`ZIP_FL_LOCAL` / `ZIP_FL_CENTRAL`) are
-/// intentionally not applied: this port stores user extra fields in both the
-/// local header and the central directory (the common, interoperable case).
+// Extra-field placement flags (`ZIP_FL_LOCAL` / `ZIP_FL_CENTRAL`) are
+// intentionally not applied: this port stores user extra fields in both the
+// local header and the central directory (the common, interoperable case).
 
 /// Host system constant (`ZIP_OPSYS_UNIX`).
 const ZIP_OPSYS_UNIX: u8 = 3;
@@ -144,6 +148,7 @@ const ZIP_SOURCE_SEEK_WRITE: c_int = 12;
 const ZIP_SOURCE_TELL_WRITE: c_int = 13;
 const ZIP_SOURCE_SUPPORTS: c_int = 14;
 const ZIP_SOURCE_REMOVE: c_int = 15;
+#[allow(dead_code)]
 const ZIP_SOURCE_RESERVED_1: c_int = 16;
 const ZIP_SOURCE_BEGIN_WRITE_CLONING: c_int = 17;
 const ZIP_SOURCE_ACCEPT_EMPTY: c_int = 18;
@@ -185,7 +190,9 @@ const SRC_WRITABLE: i64 = src_bit(ZIP_SOURCE_BEGIN_WRITE)
 const SRC_WRITE_MODE: i64 = SRC_WRITABLE & !src_bit(ZIP_SOURCE_REMOVE);
 
 /// `ZIP_STAT_*` valid bits.
+#[allow(dead_code)]
 const ZIP_STAT_NAME: u64 = 0x0001;
+#[allow(dead_code)]
 const ZIP_STAT_INDEX: u64 = 0x0002;
 const ZIP_STAT_SIZE: u64 = 0x0004;
 const ZIP_STAT_COMP_SIZE: u64 = 0x0008;
@@ -193,10 +200,12 @@ const ZIP_STAT_MTIME: u64 = 0x0010;
 const ZIP_STAT_CRC: u64 = 0x0020;
 const ZIP_STAT_COMP_METHOD: u64 = 0x0040;
 const ZIP_STAT_ENCRYPTION_METHOD: u64 = 0x0080;
+#[allow(dead_code)]
 const ZIP_STAT_FLAGS: u64 = 0x0100;
 
 /// `zip_source_zip` / `zip_source_file` flags.
 const ZIP_FL_COMPRESSED: u32 = 4;
+#[allow(dead_code)]
 const ZIP_FL_ENCRYPTED: u32 = 32;
 const ZIP_FL_UNCHANGED: u32 = 8;
 
@@ -221,8 +230,9 @@ type ZipSourceCallback =
 /// argument is the *lower* source (libzip's `_zip_source_call` passes
 /// `src->src` to a layered callback), so a layered layer can forward commands
 /// down the chain via [`zip_source_pass_to_lower_layer`].
-type ZipSourceLayeredCallback =
-    Option<unsafe extern "C" fn(lower: H, ud: *mut c_void, data: *mut c_void, len: u64, cmd: c_int) -> i64>;
+type ZipSourceLayeredCallback = Option<
+    unsafe extern "C" fn(lower: H, ud: *mut c_void, data: *mut c_void, len: u64, cmd: c_int) -> i64,
+>;
 
 /// A user-supplied `zip_progress_callback` (`void(*)(zip_t*, double, void*)`).
 /// The `double` is the 0.0..=1.0 progress fraction. The final argument is the
@@ -232,8 +242,7 @@ type ZipProgressCallback =
 
 /// A user-supplied `zip_cancel_callback` (`int(*)(zip_t*, void*)`). Returns
 /// non-zero to request that the operation be cancelled.
-type ZipCancelCallback =
-    Option<unsafe extern "C" fn(za: *mut c_void, ud: *mut c_void) -> c_int>;
+type ZipCancelCallback = Option<unsafe extern "C" fn(za: *mut c_void, ud: *mut c_void) -> c_int>;
 
 /// A `ud`-freeing callback (`void(*)(void*)`) invoked when a registered
 /// callback's user state is released (on unregister or archive close).
@@ -524,8 +533,7 @@ impl ZipSource {
                     let remaining = (bytes.len() as u64).saturating_sub(*pos);
                     let n = remaining.min(len) as usize;
                     if n > 0 {
-                        let out =
-                            unsafe { std::slice::from_raw_parts_mut(data.cast::<u8>(), n) };
+                        let out = unsafe { std::slice::from_raw_parts_mut(data.cast::<u8>(), n) };
                         out.copy_from_slice(&bytes[*pos as usize..*pos as usize + n]);
                         *pos += n as u64;
                     }
@@ -625,7 +633,8 @@ impl ZipSource {
                         pw.out.resize(end as usize, 0);
                     }
                     if len > 0 {
-                        let src = unsafe { std::slice::from_raw_parts(data.cast::<u8>(), len as usize) };
+                        let src =
+                            unsafe { std::slice::from_raw_parts(data.cast::<u8>(), len as usize) };
                         let dst = &mut pw.out[pw.offset as usize..end as usize];
                         dst.copy_from_slice(src);
                     }
@@ -860,6 +869,7 @@ struct Zip {
     /// Cached effective extra fields per logical entry index (stable pointers
     /// for `zip_file_extra_field_get*`; valid until the next metadata change).
     /// Internal ZIP64/AES fields are excluded.
+    #[allow(clippy::type_complexity)]
     extra_fields: Mutex<Vec<Vec<(u16, Vec<u8>)>>>,
     /// Structured error object (the `zip_error_t` returned by `zip_get_error`).
     error: Mutex<ZipErrorState>,
@@ -1105,7 +1115,10 @@ impl Zip {
     /// `zip_get_archive_comment` reflects the disk (used by `unchange*`).
     fn reset_archive_comment_overlay(&self) {
         let orig = self.archive.comment().as_bytes();
-        let mut ov = self.archive_comment.lock().unwrap_or_else(|e| e.into_inner());
+        let mut ov = self
+            .archive_comment
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         *ov = if orig.is_empty() {
             None
         } else {
@@ -1130,8 +1143,8 @@ impl Zip {
         pending.compressions.retain(|(i, _, _)| *i != index);
         // A pending add at this logical index is removed (subsequent adds shift
         // down by one in logical-index space).
-        if index >= self.archive.len() as u64 {
-            let add_pos = (index - self.archive.len() as u64) as usize;
+        if index >= self.archive.len() {
+            let add_pos = (index - self.archive.len()) as usize;
             if add_pos < pending.adds.len() {
                 pending.adds.remove(add_pos);
             }
@@ -1425,7 +1438,12 @@ pub unsafe extern "C" fn zip_open(path: *const c_char, flags: c_int, errorp: *mu
             Archive::open(std::io::Cursor::new(empty)).map_err(|e| e.code().as_i32())?
         };
         // Build the shared opaque handle; `zip_open` always has a write-back path.
-        Ok(make_zip(archive, flags, existed, Some(CString::new(path).unwrap_or_default())))
+        Ok(make_zip(
+            archive,
+            flags,
+            existed,
+            Some(CString::new(path).unwrap_or_default()),
+        ))
     }));
     match r {
         Ok(Ok(h)) => {
@@ -1479,15 +1497,18 @@ pub unsafe extern "C" fn zip_open_from_source(src: H, flags: c_int, error: *mut 
         if flags < 0 || src.is_null() {
             return Err(ZipErrorCode::Inval.as_i32());
         }
-        let s = src.cast::<ZipSource>().as_ref().ok_or(ZipErrorCode::Inval.as_i32())?;
+        let s = src
+            .cast::<ZipSource>()
+            .as_ref()
+            .ok_or(ZipErrorCode::Inval.as_i32())?;
         // Read the entire source (libzip requires a seekable source with a
         // known size to open from).
         let bytes = s.read_all().map_err(|_| ZipErrorCode::Read.as_i32())?;
         let truncate = flags & ZIP_TRUNCATE != 0;
         let archive = if truncate {
             // ZIP_TRUNCATE discards existing content and starts fresh.
-            let empty = write_archive(&[], &CompressOptions::default())
-                .map_err(|e| e.code().as_i32())?;
+            let empty =
+                write_archive(&[], &CompressOptions::default()).map_err(|e| e.code().as_i32())?;
             Archive::open(std::io::Cursor::new(empty)).map_err(|e| e.code().as_i32())?
         } else {
             Archive::open(std::io::Cursor::new(bytes)).map_err(|e| e.code().as_i32())?
@@ -1556,7 +1577,13 @@ pub unsafe extern "C" fn zip_fdopen(fd: c_int, flags: c_int, errorp: *mut c_int)
         let mut bytes = Vec::new();
         let mut buf = [0u8; 65536];
         loop {
-            let n = unsafe { libc::read(dupfd, buf.as_mut_ptr().cast(), buf.len() as libc::c_uint) };
+            let n = unsafe {
+                libc::read(
+                    dupfd,
+                    buf.as_mut_ptr().cast(),
+                    buf.len().try_into().unwrap(),
+                )
+            };
             if n < 0 {
                 unsafe { libc::close(dupfd) };
                 return Err(ZipErrorCode::Read.as_i32());
@@ -1756,27 +1783,33 @@ fn materialize(z: &Zip) -> Result<Vec<u8>, i32> {
     // Fire the progress callback at 0.0 (libzip `_zip_progress_start`), poll
     // the cancel callback at each checkpoint, and fire the progress callback at
     // 1.0 (libzip `_zip_progress_end`) on success.
-    let za: *mut c_void = std::ptr::from_ref(z) as *const Zip as *mut c_void;
+    let za: *mut c_void = z as *const Zip as *mut c_void;
     let has_progress = z
         .progress_cb
         .lock()
-        .map(|g| g.as_ref().map_or(false, |p| p.cb.is_some()))
+        .map(|g| g.as_ref().is_some_and(|p| p.cb.is_some()))
         .unwrap_or(false);
     let has_cancel = z
         .cancel_cb
         .lock()
-        .map(|g| g.as_ref().map_or(false, |c| c.cb.is_some()))
+        .map(|g| g.as_ref().is_some_and(|c| c.cb.is_some()))
         .unwrap_or(false);
 
     if !has_progress && !has_cancel {
         // Fast path: no callbacks registered, output is byte-identical to the
         // pre-Phase-6 writer.
-        return write_archive_full(&files, &CompressOptions::default(), &pw, &methods, &archive_comment)
-            .map_err(|e| e.code().as_i32());
+        return write_archive_full(
+            &files,
+            &CompressOptions::default(),
+            &pw,
+            &methods,
+            &archive_comment,
+        )
+        .map_err(|e| e.code().as_i32());
     }
 
     if has_progress {
-        if let Some(g) = z.progress_cb.lock().ok() {
+        if let Ok(g) = z.progress_cb.lock() {
             if let Some(p) = g.as_ref() {
                 if let Some(cb) = p.cb {
                     unsafe { cb(za, 0.0, p.ud) };
@@ -1789,7 +1822,7 @@ fn materialize(z: &Zip) -> Result<Vec<u8>, i32> {
     let mut poll = |completed: u64, total: u64| -> bool {
         let mut cancel = false;
         if has_cancel {
-            if let Some(g) = z.cancel_cb.lock().ok() {
+            if let Ok(g) = z.cancel_cb.lock() {
                 if let Some(c) = g.as_ref() {
                     if let Some(cb) = c.cb {
                         cancel = unsafe { cb(za, c.ud) } != 0;
@@ -1798,7 +1831,7 @@ fn materialize(z: &Zip) -> Result<Vec<u8>, i32> {
             }
         }
         if has_progress {
-            if let Some(g) = z.progress_cb.lock().ok() {
+            if let Ok(g) = z.progress_cb.lock() {
                 if let Some(p) = g.as_ref() {
                     if let Some(cb) = p.cb {
                         // Avoid 0/0 -> NaN for a zero-length archive; treat it as
@@ -1833,7 +1866,7 @@ fn materialize(z: &Zip) -> Result<Vec<u8>, i32> {
     match result {
         Ok(bytes) => {
             if has_progress {
-                if let Some(g) = z.progress_cb.lock().ok() {
+                if let Ok(g) = z.progress_cb.lock() {
                     if let Some(p) = g.as_ref() {
                         if let Some(cb) = p.cb {
                             unsafe { cb(za, 1.0, p.ud) };
@@ -1940,11 +1973,7 @@ pub unsafe extern "C" fn zip_set_archive_flag(zh: H, flag: c_int, value: c_int) 
                 return Err(-1);
             }
             let cur = z.ch_afl.load(Ordering::Relaxed);
-            let new_flags = if value != 0 {
-                cur | flag
-            } else {
-                cur & !flag
-            };
+            let new_flags = if value != 0 { cur | flag } else { cur & !flag };
             if new_flags == cur {
                 return Ok(0);
             }
@@ -1957,7 +1986,11 @@ pub unsafe extern "C" fn zip_set_archive_flag(zh: H, flag: c_int, value: c_int) 
             if flag == ZIP_AFL_RDONLY
                 && value != 0
                 && cur & ZIP_AFL_RDONLY == 0
-                && !z.pending.lock().unwrap_or_else(|e| e.into_inner()).is_empty()
+                && !z
+                    .pending
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_empty()
             {
                 z.set_err(ZipErrorCode::Changed.as_i32(), 0);
                 return Err(-1);
@@ -1982,7 +2015,7 @@ pub unsafe extern "C" fn zip_unchange(zh: H, index: u64) -> c_int {
         || {
             let z = zh.cast::<Zip>().as_ref().ok_or(-1)?;
             let mut pending = z.pending.lock().unwrap_or_else(|e| e.into_inner());
-            if index >= z.archive.len() as u64 + pending.adds.len() as u64 {
+            if index >= z.archive.len() + pending.adds.len() as u64 {
                 z.set_err(ZipErrorCode::Inval.as_i32(), 0);
                 return Err(-1);
             }
@@ -2006,7 +2039,8 @@ pub unsafe extern "C" fn zip_unchange_all(zh: H) -> c_int {
             let z = zh.cast::<Zip>().as_ref().ok_or(-1)?;
             let mut pending = z.pending.lock().unwrap_or_else(|e| e.into_inner());
             *pending = PendingOps::default();
-            z.ch_afl.store(z.afl.load(Ordering::Relaxed), Ordering::Relaxed);
+            z.ch_afl
+                .store(z.afl.load(Ordering::Relaxed), Ordering::Relaxed);
             z.reset_archive_comment_overlay();
             Ok(0)
         },
@@ -2029,7 +2063,8 @@ pub unsafe extern "C" fn zip_unchange_archive(zh: H) -> c_int {
                 let mut pending = z.pending.lock().unwrap_or_else(|e| e.into_inner());
                 pending.archive_comment = None;
             }
-            z.ch_afl.store(z.afl.load(Ordering::Relaxed), Ordering::Relaxed);
+            z.ch_afl
+                .store(z.afl.load(Ordering::Relaxed), Ordering::Relaxed);
             z.reset_archive_comment_overlay();
             Ok(0)
         },
@@ -2687,7 +2722,7 @@ pub unsafe extern "C" fn zip_source_buffer(
 /// `zip_source_buffer_fragment_create(fragments, nfragments, freep, errorp)`
 /// — `_create` form of the discontiguous-buffer source.
 ///
-/// Accepts an array of [`zip_buffer_fragment`] `{data, length}` fragments and
+/// Accepts an array of [`struct@zip_buffer_fragment`] `{data, length}` fragments and
 /// exposes their ordered concatenation as a source (mirroring libzip's
 /// `zip_source_buffer_fragment_create`). Zero-length fragments are skipped;
 /// a NULL `data` on a non-empty fragment, a NULL `fragments` array with
@@ -2699,7 +2734,7 @@ pub unsafe extern "C" fn zip_source_buffer(
 ///
 /// # Safety
 ///
-/// `fragments` must point to `nfragments` readable [`zip_buffer_fragment`]s
+/// `fragments` must point to `nfragments` readable [`struct@zip_buffer_fragment`]s
 /// (or be NULL when `nfragments == 0`); `errorp`, if non-null, must point to
 /// writable `int` storage.
 #[no_mangle]
@@ -2715,8 +2750,7 @@ pub unsafe extern "C" fn zip_source_buffer_fragment_create(
         }
         let mut data: Vec<u8> = Vec::new();
         if nfragments > 0 {
-            let frags =
-                unsafe { std::slice::from_raw_parts(fragments, nfragments as usize) };
+            let frags = unsafe { std::slice::from_raw_parts(fragments, nfragments as usize) };
             let mut total: u64 = 0;
             for frag in frags {
                 if frag.length == 0 {
@@ -2729,8 +2763,7 @@ pub unsafe extern "C" fn zip_source_buffer_fragment_create(
                     .checked_add(frag.length)
                     .ok_or(ZipErrorCode::Inval.as_i32())?;
                 total = new_total;
-                let src =
-                    unsafe { std::slice::from_raw_parts(frag.data, frag.length as usize) };
+                let src = unsafe { std::slice::from_raw_parts(frag.data, frag.length as usize) };
                 data.extend_from_slice(src);
             }
         }
@@ -2753,8 +2786,7 @@ pub unsafe extern "C" fn zip_source_buffer_fragment_create(
                 | ZIP_STAT_ENCRYPTION_METHOD,
             ..Stat::default()
         };
-        let src =
-            make_memory_source(data, 0, -1, stat).ok_or(ZipErrorCode::Inval.as_i32())?;
+        let src = make_memory_source(data, 0, -1, stat).ok_or(ZipErrorCode::Inval.as_i32())?;
         Ok(Box::into_raw(Box::new(src)) as H)
     }))
     .map_or(std::ptr::null_mut(), |r| r.unwrap_or(std::ptr::null_mut()));
@@ -2783,8 +2815,7 @@ pub unsafe extern "C" fn zip_source_buffer_fragment(
     if zh.is_null() {
         return std::ptr::null_mut();
     }
-    let h =
-        zip_source_buffer_fragment_create(fragments, nfragments, freep, std::ptr::null_mut());
+    let h = zip_source_buffer_fragment_create(fragments, nfragments, freep, std::ptr::null_mut());
     if h.is_null() {
         if let Some(z) = zh.cast::<Zip>().as_ref() {
             z.set_err(ZipErrorCode::Inval.as_i32(), 0);
@@ -2867,7 +2898,7 @@ fn make_memory_source(data: Vec<u8>, start: u64, len: i64, mut stat: Stat) -> Op
             pending: None,
         },
         SRC_SEEKABLE | src_bit(ZIP_SOURCE_AT_EOF),
-    ))  
+    ))
 }
 
 /// Create a `zip_source_t*` over the file at `path`, exposing the sub-range
@@ -2886,7 +2917,9 @@ unsafe fn source_file_from_path(
         if path.is_null() {
             return Err(ZipErrorCode::Inval.as_i32());
         }
-        let p = CStr::from_ptr(path).to_str().map_err(|_| ZipErrorCode::Inval.as_i32())?;
+        let p = CStr::from_ptr(path)
+            .to_str()
+            .map_err(|_| ZipErrorCode::Inval.as_i32())?;
         let meta = std::fs::metadata(p).map_err(|_| ZipErrorCode::Open.as_i32())?;
         if !meta.is_file() {
             return Err(ZipErrorCode::Open.as_i32());
@@ -2910,7 +2943,7 @@ unsafe fn source_file_from_path(
         let _ = errorp;
         Ok(Box::into_raw(Box::new(src)) as H)
     }))
-        .map_or(std::ptr::null_mut(), |r| r.unwrap_or(std::ptr::null_mut()))
+    .map_or(std::ptr::null_mut(), |r| r.unwrap_or(std::ptr::null_mut()))
 }
 
 /// `zip_source_file_create(path, start, len, errorp)`.
@@ -2941,12 +2974,7 @@ pub unsafe extern "C" fn zip_source_file_create(
 ///
 /// `zh` a valid handle; `path` a NUL-terminated C string.
 #[no_mangle]
-pub unsafe extern "C" fn zip_source_file(
-    zh: H,
-    path: *const c_char,
-    start: u64,
-    len: i64,
-) -> H {
+pub unsafe extern "C" fn zip_source_file(zh: H, path: *const c_char, start: u64, len: i64) -> H {
     let h = source_file_from_path(zh, path, start, len, std::ptr::null_mut());
     if h.is_null() {
         if let Some(z) = zh.cast::<Zip>().as_ref() {
@@ -3006,7 +3034,7 @@ pub unsafe extern "C" fn zip_source_filep_create(
         let src = make_memory_source(data, start, len, stat).ok_or(ZipErrorCode::Inval.as_i32())?;
         Ok(Box::into_raw(Box::new(src)) as H)
     }))
-        .map_or(std::ptr::null_mut(), |r| r.unwrap_or(std::ptr::null_mut()));
+    .map_or(std::ptr::null_mut(), |r| r.unwrap_or(std::ptr::null_mut()));
     if h.is_null() && !errorp.is_null() {
         unsafe {
             *errorp = ZipErrorCode::Open.as_i32();
@@ -3022,12 +3050,7 @@ pub unsafe extern "C" fn zip_source_filep_create(
 ///
 /// `zh` a valid handle; `file` a valid open `FILE*`.
 #[no_mangle]
-pub unsafe extern "C" fn zip_source_filep(
-    zh: H,
-    file: *mut libc::FILE,
-    start: u64,
-    len: i64,
-) -> H {
+pub unsafe extern "C" fn zip_source_filep(zh: H, file: *mut libc::FILE, start: u64, len: i64) -> H {
     let h = zip_source_filep_create(file, start, len, std::ptr::null_mut());
     if h.is_null() {
         if let Some(z) = zh.cast::<Zip>().as_ref() {
@@ -3093,11 +3116,7 @@ unsafe fn win32_path_from_wide(ptr: *const u16) -> Result<std::path::PathBuf, i3
 
 /// Read a file's content + stat via the stdio path for a path source.
 #[cfg(windows)]
-unsafe fn win32_source_from_path(
-    path: &std::path::Path,
-    start: u64,
-    len: i64,
-) -> Result<H, i32> {
+unsafe fn win32_source_from_path(path: &std::path::Path, start: u64, len: i64) -> Result<H, i32> {
     let meta = std::fs::metadata(path).map_err(|_| ZipErrorCode::Open.as_i32())?;
     if !meta.is_file() {
         return Err(ZipErrorCode::Open.as_i32());
@@ -3129,11 +3148,7 @@ unsafe fn win32_source_from_path(
 ///
 /// `h` must be a Windows `HANDLE` value (owned by this source per libzip).
 #[cfg(windows)]
-unsafe fn win32_source_from_handle(
-    h: H,
-    start: u64,
-    len: i64,
-) -> Result<H, i32> {
+unsafe fn win32_source_from_handle(h: H, start: u64, len: i64) -> Result<H, i32> {
     use std::os::windows::io::FromRawHandle;
     // `INVALID_HANDLE_VALUE` is (HANDLE)-1.
     if h.is_null() || h as usize == usize::MAX {
@@ -3147,8 +3162,7 @@ unsafe fn win32_source_from_handle(
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs());
     let mut data = Vec::new();
-    std::io::Read::read_to_end(&mut f, &mut data)
-        .map_err(|_| ZipErrorCode::Read.as_i32())?;
+    std::io::Read::read_to_end(&mut f, &mut data).map_err(|_| ZipErrorCode::Read.as_i32())?;
     // `f` drops here -> closes the handle.
     let stat = Stat {
         size: Some(data.len() as u64),
@@ -3179,7 +3193,9 @@ pub unsafe extern "C" fn zip_source_win32a_create(
             return Err(ZipErrorCode::Inval.as_i32());
         }
         let path = std::path::PathBuf::from(
-            CStr::from_ptr(fname).to_str().map_err(|_| ZipErrorCode::Inval.as_i32())?,
+            CStr::from_ptr(fname)
+                .to_str()
+                .map_err(|_| ZipErrorCode::Inval.as_i32())?,
         );
         win32_source_from_path(&path, start, len)
     }));
@@ -3215,12 +3231,7 @@ pub unsafe extern "C" fn zip_source_win32a_create(
 /// `zh` a valid handle; `fname` a NUL-terminated C string.
 #[cfg(windows)]
 #[no_mangle]
-pub unsafe extern "C" fn zip_source_win32a(
-    zh: H,
-    fname: *const c_char,
-    start: u64,
-    len: i64,
-) -> H {
+pub unsafe extern "C" fn zip_source_win32a(zh: H, fname: *const c_char, start: u64, len: i64) -> H {
     if zh.is_null() {
         return std::ptr::null_mut();
     }
@@ -3286,12 +3297,7 @@ pub unsafe extern "C" fn zip_source_win32w_create(
 /// `zh` a valid handle; `fname` a NUL-terminated UTF-16 buffer.
 #[cfg(windows)]
 #[no_mangle]
-pub unsafe extern "C" fn zip_source_win32w(
-    zh: H,
-    fname: *const u16,
-    start: u64,
-    len: i64,
-) -> H {
+pub unsafe extern "C" fn zip_source_win32w(zh: H, fname: *const u16, start: u64, len: i64) -> H {
     if zh.is_null() {
         return std::ptr::null_mut();
     }
@@ -3358,12 +3364,7 @@ pub unsafe extern "C" fn zip_source_win32handle_create(
 /// `zh` a valid handle; `h` a valid open Windows `HANDLE` (owned by this source).
 #[cfg(windows)]
 #[no_mangle]
-pub unsafe extern "C" fn zip_source_win32handle(
-    zh: H,
-    h: H,
-    start: u64,
-    len: i64,
-) -> H {
+pub unsafe extern "C" fn zip_source_win32handle(zh: H, h: H, start: u64, len: i64) -> H {
     if zh.is_null() {
         return std::ptr::null_mut();
     }
@@ -3398,7 +3399,7 @@ pub unsafe extern "C" fn zip_source_function_create(
         );
         Ok(Box::into_raw(Box::new(src)) as H)
     }))
-        .map_or(std::ptr::null_mut(), |r| r.unwrap_or(std::ptr::null_mut()));
+    .map_or(std::ptr::null_mut(), |r| r.unwrap_or(std::ptr::null_mut()));
     if h.is_null() && !errorp.is_null() {
         unsafe {
             *errorp = ZipErrorCode::Inval.as_i32();
@@ -3414,11 +3415,7 @@ pub unsafe extern "C" fn zip_source_function_create(
 ///
 /// `zh` a valid handle; `cb` a valid `zip_source_callback`.
 #[no_mangle]
-pub unsafe extern "C" fn zip_source_function(
-    zh: H,
-    cb: ZipSourceCallback,
-    ud: *mut c_void,
-) -> H {
+pub unsafe extern "C" fn zip_source_function(zh: H, cb: ZipSourceCallback, ud: *mut c_void) -> H {
     let h = zip_source_function_create(cb, ud, std::ptr::null_mut());
     if h.is_null() {
         if let Some(z) = zh.cast::<Zip>().as_ref() {
@@ -3445,7 +3442,10 @@ pub unsafe extern "C" fn zip_source_window_create(
         if src.is_null() {
             return Err(ZipErrorCode::Inval.as_i32());
         }
-        let s = src.cast::<ZipSource>().as_ref().ok_or(ZipErrorCode::Inval.as_i32())?;
+        let s = src
+            .cast::<ZipSource>()
+            .as_ref()
+            .ok_or(ZipErrorCode::Inval.as_i32())?;
         // Capture the lower layer's stat (mtime etc.) via a proper `zip_stat`
         // buffer before consuming it.
         let mut zs = zip_stat {
@@ -3475,7 +3475,7 @@ pub unsafe extern "C" fn zip_source_window_create(
         let src = make_memory_source(data, offset, len, st).ok_or(ZipErrorCode::Inval.as_i32())?;
         Ok(Box::into_raw(Box::new(src)) as H)
     }))
-        .map_or(std::ptr::null_mut(), |r| r.unwrap_or(std::ptr::null_mut()));
+    .map_or(std::ptr::null_mut(), |r| r.unwrap_or(std::ptr::null_mut()));
     if h.is_null() && !errorp.is_null() {
         unsafe {
             *errorp = ZipErrorCode::Inval.as_i32();
@@ -3491,12 +3491,7 @@ pub unsafe extern "C" fn zip_source_window_create(
 ///
 /// `zh` a valid handle; `src` a valid `zip_source_t*`.
 #[no_mangle]
-pub unsafe extern "C" fn zip_source_window(
-    zh: H,
-    src: H,
-    offset: u64,
-    len: i64,
-) -> H {
+pub unsafe extern "C" fn zip_source_window(zh: H, src: H, offset: u64, len: i64) -> H {
     let h = zip_source_window_create(src, offset, len, std::ptr::null_mut());
     if h.is_null() {
         if let Some(z) = zh.cast::<Zip>().as_ref() {
@@ -3524,10 +3519,15 @@ pub unsafe extern "C" fn zip_source_zip_create(
     errorp: *mut c_int,
 ) -> H {
     let h = catch_unwind(AssertUnwindSafe(|| -> Result<H, i32> {
-        let z = za.cast::<Zip>().as_ref().ok_or(ZipErrorCode::Inval.as_i32())?;
+        let z = za
+            .cast::<Zip>()
+            .as_ref()
+            .ok_or(ZipErrorCode::Inval.as_i32())?;
         let compressed = flags & ZIP_FL_COMPRESSED != 0;
         let data = if compressed {
-            z.archive.read_compressed_entry(index).map_err(|e| e.code().as_i32())?
+            z.archive
+                .read_compressed_entry(index)
+                .map_err(|e| e.code().as_i32())?
         } else {
             z.archive.read_entry(index).map_err(|e| e.code().as_i32())?
         };
@@ -3535,7 +3535,7 @@ pub unsafe extern "C" fn zip_source_zip_create(
         let src = make_memory_source(data, start, len, st).ok_or(ZipErrorCode::Inval.as_i32())?;
         Ok(Box::into_raw(Box::new(src)) as H)
     }))
-        .map_or(std::ptr::null_mut(), |r| r.unwrap_or(std::ptr::null_mut()));
+    .map_or(std::ptr::null_mut(), |r| r.unwrap_or(std::ptr::null_mut()));
     if h.is_null() && !errorp.is_null() {
         // Recover the failure code from the archive's error if available.
         let code = za
@@ -3913,8 +3913,13 @@ fn make_bitmap(cmds: &[c_int]) -> i64 {
 ///
 /// libzip's version is variadic; Rust cannot define a variadic export, so this
 /// exports the fixed-arity core (bit `cmd0`). The full variadic behavior is
-/// available to Rust callers via [`make_bitmap`] and is exercised by
+/// available to Rust callers via `make_bitmap` and is exercised by
 /// `source_helpers_parity`.
+///
+/// # Safety
+///
+/// This is a C ABI export; it takes no pointers and is safe to call with any
+/// `cmd0` value.
 #[no_mangle]
 pub unsafe extern "C" fn zip_source_make_command_bitmap(cmd0: c_int) -> i64 {
     src_bit(cmd0)
@@ -3929,7 +3934,10 @@ pub unsafe extern "C" fn zip_source_make_command_bitmap(cmd0: c_int) -> i64 {
 ///
 /// `data` must point to `len` readable bytes.
 #[no_mangle]
-pub unsafe extern "C" fn zip_source_args_seek(data: *mut c_void, len: u64) -> *mut ZipSourceArgsSeek {
+pub unsafe extern "C" fn zip_source_args_seek(
+    data: *mut c_void,
+    len: u64,
+) -> *mut ZipSourceArgsSeek {
     if data.is_null() || len < std::mem::size_of::<ZipSourceArgsSeek>() as u64 {
         std::ptr::null_mut()
     } else {
@@ -4003,52 +4011,50 @@ pub unsafe extern "C" fn zip_source_pass_to_lower_layer(
     command: c_int,
 ) -> i64 {
     guarded(
-        || {
-            match command {
-                ZIP_SOURCE_OPEN
-                | ZIP_SOURCE_CLOSE
-                | ZIP_SOURCE_FREE
-                | ZIP_SOURCE_GET_FILE_ATTRIBUTES
-                | ZIP_SOURCE_SUPPORTS_REOPEN => Ok(0),
-                ZIP_SOURCE_STAT => Ok(std::mem::size_of::<zip_stat>() as i64),
-                ZIP_SOURCE_ACCEPT_EMPTY
-                | ZIP_SOURCE_AT_EOF
-                | ZIP_SOURCE_ERROR
-                | ZIP_SOURCE_GET_DOS_TIME
-                | ZIP_SOURCE_READ
-                | ZIP_SOURCE_SEEK
-                | ZIP_SOURCE_TELL => {
-                    let s = src.cast::<ZipSource>().as_ref().ok_or(-1)?;
-                    Ok(s.dispatch(command, data, length))
+        || match command {
+            ZIP_SOURCE_OPEN
+            | ZIP_SOURCE_CLOSE
+            | ZIP_SOURCE_FREE
+            | ZIP_SOURCE_GET_FILE_ATTRIBUTES
+            | ZIP_SOURCE_SUPPORTS_REOPEN => Ok(0),
+            ZIP_SOURCE_STAT => Ok(std::mem::size_of::<zip_stat>() as i64),
+            ZIP_SOURCE_ACCEPT_EMPTY
+            | ZIP_SOURCE_AT_EOF
+            | ZIP_SOURCE_ERROR
+            | ZIP_SOURCE_GET_DOS_TIME
+            | ZIP_SOURCE_READ
+            | ZIP_SOURCE_SEEK
+            | ZIP_SOURCE_TELL => {
+                let s = src.cast::<ZipSource>().as_ref().ok_or(-1)?;
+                Ok(s.dispatch(command, data, length))
+            }
+            ZIP_SOURCE_BEGIN_WRITE
+            | ZIP_SOURCE_BEGIN_WRITE_CLONING
+            | ZIP_SOURCE_COMMIT_WRITE
+            | ZIP_SOURCE_REMOVE
+            | ZIP_SOURCE_ROLLBACK_WRITE
+            | ZIP_SOURCE_SEEK_WRITE
+            | ZIP_SOURCE_TELL_WRITE
+            | ZIP_SOURCE_WRITE => {
+                if let Some(s) = src.cast::<ZipSource>().as_ref() {
+                    s.set_err(ZipErrorCode::Opnotsupp.as_i32(), 0);
                 }
-                ZIP_SOURCE_BEGIN_WRITE
-                | ZIP_SOURCE_BEGIN_WRITE_CLONING
-                | ZIP_SOURCE_COMMIT_WRITE
-                | ZIP_SOURCE_REMOVE
-                | ZIP_SOURCE_ROLLBACK_WRITE
-                | ZIP_SOURCE_SEEK_WRITE
-                | ZIP_SOURCE_TELL_WRITE
-                | ZIP_SOURCE_WRITE => {
+                Err(-1)
+            }
+            ZIP_SOURCE_SUPPORTS => {
+                if length < std::mem::size_of::<i64>() as u64 {
                     if let Some(s) = src.cast::<ZipSource>().as_ref() {
-                        s.set_err(ZipErrorCode::Opnotsupp.as_i32(), 0);
+                        s.set_err(ZipErrorCode::Internal.as_i32(), 0);
                     }
-                    Err(-1)
+                    return Err(-1);
                 }
-                ZIP_SOURCE_SUPPORTS => {
-                    if length < std::mem::size_of::<i64>() as u64 {
-                        if let Some(s) = src.cast::<ZipSource>().as_ref() {
-                            s.set_err(ZipErrorCode::Internal.as_i32(), 0);
-                        }
-                        return Err(-1);
-                    }
-                    Ok(*(data as *const i64))
+                Ok(*(data as *const i64))
+            }
+            _ => {
+                if let Some(s) = src.cast::<ZipSource>().as_ref() {
+                    s.set_err(ZipErrorCode::Opnotsupp.as_i32(), 0);
                 }
-                _ => {
-                    if let Some(s) = src.cast::<ZipSource>().as_ref() {
-                        s.set_err(ZipErrorCode::Opnotsupp.as_i32(), 0);
-                    }
-                    Err(-1)
-                }
+                Err(-1)
             }
         },
         -1,
@@ -4277,7 +4283,10 @@ pub unsafe extern "C" fn zip_source_layered_create(
             return Err(ZipErrorCode::Inval.as_i32());
         }
         let cb = cb.unwrap();
-        let lower = src.cast::<ZipSource>().as_ref().ok_or(ZipErrorCode::Inval.as_i32())?;
+        let lower = src
+            .cast::<ZipSource>()
+            .as_ref()
+            .ok_or(ZipErrorCode::Inval.as_i32())?;
         let lower_supports = lower.query_supports();
         let supports = cb(
             src,
@@ -4489,7 +4498,12 @@ unsafe fn zip_source_crc_create(src: H, validate: c_int, _errorp: *mut c_int) ->
         err_zip: 0,
         err_sys: 0,
     }));
-    let h = zip_source_layered_create(src, Some(crc_layered_cb), ctx as *mut c_void, std::ptr::null_mut());
+    let h = zip_source_layered_create(
+        src,
+        Some(crc_layered_cb),
+        ctx as *mut c_void,
+        std::ptr::null_mut(),
+    );
     if h.is_null() {
         drop(unsafe { Box::from_raw(ctx) });
     }
@@ -4601,7 +4615,12 @@ unsafe fn zip_source_compress(src: H, method: i32, _flags: u32) -> H {
         err_zip: 0,
         err_sys: 0,
     }));
-    let h = zip_source_layered_create(src, Some(compress_layered_cb), ctx as *mut c_void, std::ptr::null_mut());
+    let h = zip_source_layered_create(
+        src,
+        Some(compress_layered_cb),
+        ctx as *mut c_void,
+        std::ptr::null_mut(),
+    );
     if h.is_null() {
         drop(unsafe { Box::from_raw(ctx) });
     }
@@ -4857,7 +4876,10 @@ pub unsafe extern "C" fn zip_register_progress_callback_with_state(
 ) -> c_int {
     guarded(
         || {
-            let z = zh.cast::<Zip>().as_ref().ok_or(ZipErrorCode::Inval.as_i32())?;
+            let z = zh
+                .cast::<Zip>()
+                .as_ref()
+                .ok_or(ZipErrorCode::Inval.as_i32())?;
             let mut g = z.progress_cb.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(old) = g.take() {
                 if let Some(f) = old.ud_free {
@@ -4901,7 +4923,10 @@ pub unsafe extern "C" fn zip_register_cancel_callback_with_state(
 ) -> c_int {
     guarded(
         || {
-            let z = zh.cast::<Zip>().as_ref().ok_or(ZipErrorCode::Inval.as_i32())?;
+            let z = zh
+                .cast::<Zip>()
+                .as_ref()
+                .ok_or(ZipErrorCode::Inval.as_i32())?;
             let mut g = z.cancel_cb.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(old) = g.take() {
                 if let Some(f) = old.ud_free {
@@ -4928,20 +4953,11 @@ pub unsafe extern "C" fn zip_register_cancel_callback_with_state(
 /// `zh` must be a valid, open handle; `cb`, if non-null, must be a valid C
 /// function pointer.
 #[no_mangle]
-pub unsafe extern "C" fn zip_register_progress_callback(
-    zh: H,
-    cb: ZipLegacyProgressCallback,
-) {
+pub unsafe extern "C" fn zip_register_progress_callback(zh: H, cb: ZipLegacyProgressCallback) {
     if cb.is_none() {
         // Unregister (no user state to free).
         unsafe {
-            zip_register_progress_callback_with_state(
-                zh,
-                0.001,
-                None,
-                None,
-                std::ptr::null_mut(),
-            )
+            zip_register_progress_callback_with_state(zh, 0.001, None, None, std::ptr::null_mut())
         };
         return;
     }
@@ -5369,7 +5385,10 @@ pub unsafe extern "C" fn zip_get_archive_comment(
         || {
             let z = zh.cast::<Zip>().as_ref().ok_or(-1)?;
             let g = z.archive_comment.lock().unwrap_or_else(|e| e.into_inner());
-            let p = g.as_ref().map(|c| c.as_ptr() as *const c_char).unwrap_or(std::ptr::null());
+            let p = g
+                .as_ref()
+                .map(|c| c.as_ptr() as *const c_char)
+                .unwrap_or(std::ptr::null());
             if !lenp.is_null() {
                 unsafe {
                     *lenp = g
@@ -5594,11 +5613,7 @@ pub unsafe extern "C" fn zip_file_extra_field_get_by_id(
 /// `zh` must be a valid, open handle; `comment` (if non-null) must point to at
 /// least `len` readable bytes.
 #[no_mangle]
-pub unsafe extern "C" fn zip_set_archive_comment(
-    zh: H,
-    comment: *const c_char,
-    len: u16,
-) -> c_int {
+pub unsafe extern "C" fn zip_set_archive_comment(zh: H, comment: *const c_char, len: u16) -> c_int {
     guarded(
         || {
             let z = zh.cast::<Zip>().as_ref().ok_or(-1)?;
@@ -5704,8 +5719,10 @@ pub unsafe extern "C" fn zip_set_file_comment(
             } else if len < 0 {
                 Some(CStr::from_ptr(comment).to_bytes().to_vec())
             } else {
-                Some(unsafe { std::slice::from_raw_parts(comment.cast::<u8>(), len as usize) }
-                    .to_vec())
+                Some(
+                    unsafe { std::slice::from_raw_parts(comment.cast::<u8>(), len as usize) }
+                        .to_vec(),
+                )
             };
             z.set_file_comment_pending(index, bytes)?;
             Ok(0)
@@ -5773,9 +5790,14 @@ pub unsafe extern "C" fn zip_file_extra_field_set(
             }
             {
                 let mut pending = z.pending.lock().unwrap_or_else(|e| e.into_inner());
-                pending
-                    .extra_field_ops
-                    .push((index, ExtraFieldOp::Set { id, ef_idx, data: bytes }));
+                pending.extra_field_ops.push((
+                    index,
+                    ExtraFieldOp::Set {
+                        id,
+                        ef_idx,
+                        data: bytes,
+                    },
+                ));
             }
             {
                 let pending = z.pending.lock().unwrap_or_else(|e| e.into_inner());
@@ -5819,7 +5841,9 @@ pub unsafe extern "C" fn zip_file_extra_field_delete(
             }
             {
                 let mut pending = z.pending.lock().unwrap_or_else(|e| e.into_inner());
-                pending.extra_field_ops.push((index, ExtraFieldOp::Delete { ef_idx }));
+                pending
+                    .extra_field_ops
+                    .push((index, ExtraFieldOp::Delete { ef_idx }));
             }
             {
                 let pending = z.pending.lock().unwrap_or_else(|e| e.into_inner());
@@ -5869,7 +5893,9 @@ pub unsafe extern "C" fn zip_file_extra_field_delete_by_id(
             }
             {
                 let mut pending = z.pending.lock().unwrap_or_else(|e| e.into_inner());
-                pending.extra_field_ops.push((index, ExtraFieldOp::DeleteById { id, ef_idx }));
+                pending
+                    .extra_field_ops
+                    .push((index, ExtraFieldOp::DeleteById { id, ef_idx }));
             }
             {
                 let pending = z.pending.lock().unwrap_or_else(|e| e.into_inner());
@@ -5889,12 +5915,7 @@ pub unsafe extern "C" fn zip_file_extra_field_delete_by_id(
 ///
 /// `zh` must be a valid, open handle.
 #[no_mangle]
-pub unsafe extern "C" fn zip_file_set_mtime(
-    zh: H,
-    index: u64,
-    mtime: i64,
-    _flags: u32,
-) -> c_int {
+pub unsafe extern "C" fn zip_file_set_mtime(zh: H, index: u64, mtime: i64, _flags: u32) -> c_int {
     guarded(
         || {
             let z = zh.cast::<Zip>().as_ref().ok_or(-1)?;
@@ -6065,7 +6086,8 @@ pub unsafe extern "C" fn zip_set_file_compression(
                 z.set_err(ZipErrorCode::Inval.as_i32(), 0);
                 return Err(-1);
             }
-            let supported = method == ZIP_CM_DEFAULT || method == ZIP_CM_STORE || method == ZIP_CM_DEFLATE;
+            let supported =
+                method == ZIP_CM_DEFAULT || method == ZIP_CM_STORE || method == ZIP_CM_DEFLATE;
             if !supported {
                 z.set_err(ZipErrorCode::Compnotsupp.as_i32(), 0);
                 return Err(-1);
@@ -6099,7 +6121,6 @@ mod tests {
     use std::path::PathBuf;
     use zip_core::constant::magic;
     use zip_core::{write_archive, ArchiveFile, CompressOptions};
-
 
     /// `err_str` must return the EXACT libzip message string (sentence-case,
     /// wording, capitalization) for every error code, matching libzip's
@@ -7031,7 +7052,10 @@ mod tests {
         );
 
         // Setting the reserved torrentzip flag is invalid (-1, defined error).
-        assert_eq!(unsafe { zip_set_archive_flag(zh, ZIP_AFL_IS_TORRENTZIP, 1) }, -1);
+        assert_eq!(
+            unsafe { zip_set_archive_flag(zh, ZIP_AFL_IS_TORRENTZIP, 1) },
+            -1
+        );
         assert_eq!(unsafe { zip_error_code_zip(zip_get_error(zh)) }, 18); // INVAL
 
         unsafe { zip_close(zh) };
@@ -7077,7 +7101,10 @@ mod tests {
         let src = CString::new("new-file-data").unwrap();
         let s = unsafe { zip_source_buffer(zh, src.as_ptr() as *const c_void, 13, 0) };
         assert!(!s.is_null());
-        assert_eq!(unsafe { zip_file_add(zh, CString::new("new.txt").unwrap().as_ptr(), s, 0) }, 3);
+        assert_eq!(
+            unsafe { zip_file_add(zh, CString::new("new.txt").unwrap().as_ptr(), s, 0) },
+            3
+        );
         unsafe { zip_source_free(s) };
         let acmt = CString::new("new archive comment").unwrap();
         assert_eq!(unsafe { zip_set_archive_comment(zh, acmt.as_ptr(), 19) }, 0);
@@ -7092,9 +7119,7 @@ mod tests {
         assert_eq!(unsafe { zip_get_num_entries(zh2, 0) }, 3);
         assert_eq!(unsafe { cstr(zip_get_name(zh2, 0, 0)) }, "a.txt");
         assert_eq!(unsafe { cstr(zip_get_name(zh2, 1, 0)) }, "b.bin");
-        let fh = unsafe {
-            zip_fopen(zh2, CString::new("a.txt").unwrap().as_ptr(), 0)
-        };
+        let fh = unsafe { zip_fopen(zh2, CString::new("a.txt").unwrap().as_ptr(), 0) };
         assert!(!fh.is_null());
         let data = unsafe { read_ffi_full(fh) };
         assert_eq!(data, b"hello ffi read path content ".repeat(20));
@@ -7153,14 +7178,14 @@ mod tests {
         // OS-backed codes -> ZIP_ET_SYS.
         assert_eq!(zip_error_get_sys_type(5), ZIP_ET_SYS); // Read
         assert_eq!(zip_error_get_sys_type(11), ZIP_ET_SYS); // Open
-        // Zlib code.
+                                                            // Zlib code.
         assert_eq!(zip_error_get_sys_type(13), ZIP_ET_ZLIB);
         // Libzip-inconsistent code.
         assert_eq!(zip_error_get_sys_type(21), ZIP_ET_LIBZIP);
         // Pure zip codes -> NONE.
         assert_eq!(zip_error_get_sys_type(9), ZIP_ET_NONE); // Noent
         assert_eq!(zip_error_get_sys_type(27), ZIP_ET_NONE); // Wrongpasswd
-        // Out-of-range / negative -> NONE, no panic.
+                                                             // Out-of-range / negative -> NONE, no panic.
         assert_eq!(zip_error_get_sys_type(999), ZIP_ET_NONE);
         assert_eq!(zip_error_get_sys_type(-5), ZIP_ET_NONE);
     }
@@ -7169,15 +7194,27 @@ mod tests {
     #[test]
     fn phase7_malformed_no_panic() {
         // NULL handles -> defined error / sentinel, no panic.
-        assert_eq!(unsafe { zip_get_archive_flag(std::ptr::null_mut(), ZIP_AFL_RDONLY, 0) }, -1);
-        assert_eq!(unsafe { zip_set_archive_flag(std::ptr::null_mut(), ZIP_AFL_RDONLY, 1) }, -1);
+        assert_eq!(
+            unsafe { zip_get_archive_flag(std::ptr::null_mut(), ZIP_AFL_RDONLY, 0) },
+            -1
+        );
+        assert_eq!(
+            unsafe { zip_set_archive_flag(std::ptr::null_mut(), ZIP_AFL_RDONLY, 1) },
+            -1
+        );
         assert_eq!(unsafe { zip_unchange(std::ptr::null_mut(), 0) }, -1);
         assert_eq!(unsafe { zip_unchange_all(std::ptr::null_mut()) }, -1);
         assert_eq!(unsafe { zip_unchange_archive(std::ptr::null_mut()) }, -1);
         assert_eq!(unsafe { zip_get_num_files(std::ptr::null_mut()) }, -1);
         assert!(unsafe { zip_file_get_error(std::ptr::null_mut()) }.is_null());
         unsafe { zip_file_error_clear(std::ptr::null_mut()) }; // no-op
-        unsafe { zip_file_error_get(std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) };
+        unsafe {
+            zip_file_error_get(
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
         // NULL out-params are tolerated.
         assert_eq!(zip_error_get_sys_type(13), ZIP_ET_ZLIB);
     }
@@ -7285,9 +7322,13 @@ mod tests {
             zip_core::ArchiveFile::new("payload.bin", vec![0xAB; 512]),
         ];
         let encrypt = vec![true; files.len()];
-        let bytes =
-            zip_core::write_archive_encrypted(&files, &zip_core::CompressOptions::default(), password, &encrypt)
-                .unwrap();
+        let bytes = zip_core::write_archive_encrypted(
+            &files,
+            &zip_core::CompressOptions::default(),
+            password,
+            &encrypt,
+        )
+        .unwrap();
         std::fs::write(path, bytes).unwrap();
     }
 
@@ -7362,12 +7403,21 @@ mod tests {
         unsafe { zip_source_free(src) };
 
         // Set encryption to traditional PKWARE.
-        assert_eq!(unsafe { zip_file_set_encryption(zh, idx as u64, ZIP_EM_TRAD_PKWARE) }, 0);
+        assert_eq!(
+            unsafe { zip_file_set_encryption(zh, idx as u64, ZIP_EM_TRAD_PKWARE) },
+            0
+        );
         // Unsupported method -> ZIP_ER_ENCRNOTSUPP (24).
         assert_eq!(unsafe { zip_file_set_encryption(zh, idx as u64, 99) }, -1);
-        assert_eq!(cstr(unsafe { zip_strerror(zh) }), "Encryption method not supported");
+        assert_eq!(
+            cstr(unsafe { zip_strerror(zh) }),
+            "Encryption method not supported"
+        );
         // Restore supported method.
-        assert_eq!(unsafe { zip_file_set_encryption(zh, idx as u64, ZIP_EM_TRAD_PKWARE) }, 0);
+        assert_eq!(
+            unsafe { zip_file_set_encryption(zh, idx as u64, ZIP_EM_TRAD_PKWARE) },
+            0
+        );
 
         assert_eq!(unsafe { zip_close(zh) }, 0);
 
@@ -7389,10 +7439,7 @@ mod tests {
         unsafe { zip_fclose(fh) };
 
         // Set default password on the reopened archive and fopen normally.
-        assert_eq!(
-            unsafe { zip_set_default_password(zh2, pw.as_ptr()) },
-            0
-        );
+        assert_eq!(unsafe { zip_set_default_password(zh2, pw.as_ptr()) }, 0);
         let fh2 = unsafe { zip_fopen_index(zh2, idx as u64, 0) };
         assert!(!fh2.is_null(), "default password should decrypt on fopen");
         assert_eq!(unsafe { read_ffi_full(fh2) }, data);
@@ -7435,18 +7482,42 @@ mod tests {
     /// All four Phase 1 symbols must resolve via libloading/dlopen.
     #[test]
     fn abi_symbols_present() {
-        // Locate the cdylib in the workspace target dir (the crate's own
-        // CWD is the package dir, so use an absolute path from the manifest).
+        // Locate the cdylib in the workspace target dir (the crate's own CWD
+        // is the package dir, so use an absolute path from the manifest).
         let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let candidates = [
-            manifest.join("../../target/release/zip.dll"),
-            manifest.join("../../target/debug/zip.dll"),
-        ];
-        let path = candidates
-            .iter()
-            .find(|p| p.exists())
-            .expect("zip.dll not found for ABI probe");
-        let lib = unsafe { libloading::Library::new(path) }.expect("load zip.dll for ABI probe");
+        let profile = if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        };
+        let cdylib = if cfg!(target_os = "windows") {
+            "zip.dll"
+        } else if cfg!(target_os = "macos") {
+            "libzip.dylib"
+        } else {
+            "libzip.so"
+        };
+        let path = manifest.join(format!("../../target/{profile}/{cdylib}"));
+        if !path.exists() {
+            // `cargo test --workspace` does not build the cdylib artifact, so
+            // build it on demand (in the matching profile) before probing.
+            let mut cmd = std::process::Command::new(env!("CARGO"));
+            cmd.arg("build").arg("-p").arg("zip-sys");
+            if !cfg!(debug_assertions) {
+                cmd.arg("--release");
+            }
+            let status = cmd
+                .status()
+                .expect("failed to run cargo build for ABI probe");
+            assert!(status.success(), "cargo build for ABI probe failed");
+        }
+        assert!(
+            path.exists(),
+            "zip cdylib not found for ABI probe: {}",
+            path.display()
+        );
+        let lib =
+            unsafe { libloading::Library::new(&path) }.expect("load zip cdylib for ABI probe");
         for sym in [
             "zip_fopen_encrypted",
             "zip_fopen_index_encrypted",
@@ -7657,14 +7728,20 @@ mod tests {
         assert!(idx >= 0, "zip_file_add failed");
         unsafe { zip_source_free(src) };
 
-        assert_eq!(unsafe { zip_file_set_encryption(zh, idx as u64, ZIP_EM_AES_256) }, 0);
+        assert_eq!(
+            unsafe { zip_file_set_encryption(zh, idx as u64, ZIP_EM_AES_256) },
+            0
+        );
         // Unsupported method -> ZIP_ER_ENCRNOTSUPP (24).
         assert_eq!(unsafe { zip_file_set_encryption(zh, idx as u64, 99) }, -1);
         assert_eq!(
             cstr(unsafe { zip_strerror(zh) }),
             "Encryption method not supported"
         );
-        assert_eq!(unsafe { zip_file_set_encryption(zh, idx as u64, ZIP_EM_AES_256) }, 0);
+        assert_eq!(
+            unsafe { zip_file_set_encryption(zh, idx as u64, ZIP_EM_AES_256) },
+            0
+        );
 
         assert_eq!(unsafe { zip_close(zh) }, 0);
 
@@ -7762,14 +7839,18 @@ mod tests {
         let arch_cmt = "archive comment"; // 16 bytes
         let file_cmt = "file comment"; // 12 bytes
         assert_eq!(
-            unsafe {
-                zip_set_archive_comment(zh, CString::new(arch_cmt).unwrap().as_ptr(), 16)
-            },
+            unsafe { zip_set_archive_comment(zh, CString::new(arch_cmt).unwrap().as_ptr(), 16) },
             0
         );
         assert_eq!(
             unsafe {
-                zip_file_set_comment(zh, idx as u64, CString::new(file_cmt).unwrap().as_ptr(), 12, 0)
+                zip_file_set_comment(
+                    zh,
+                    idx as u64,
+                    CString::new(file_cmt).unwrap().as_ptr(),
+                    12,
+                    0,
+                )
             },
             0
         );
@@ -7802,14 +7883,22 @@ mod tests {
         assert_eq!(flen, uni.len() as c_int);
 
         // Setting an empty/NULL comment removes it.
-        assert_eq!(unsafe { zip_file_set_comment(zh2, idx as u64, std::ptr::null(), 0, 0) }, 0);
-        assert_eq!(unsafe { zip_set_archive_comment(zh2, std::ptr::null(), 0) }, 0);
+        assert_eq!(
+            unsafe { zip_file_set_comment(zh2, idx as u64, std::ptr::null(), 0, 0) },
+            0
+        );
+        assert_eq!(
+            unsafe { zip_set_archive_comment(zh2, std::ptr::null(), 0) },
+            0
+        );
         assert_eq!(unsafe { zip_close(zh2) }, 0);
 
         let zh3 = unsafe { zip_open(cpath.as_ptr(), 0, std::ptr::null_mut()) };
         assert!(!zh3.is_null());
         assert!(unsafe { zip_get_archive_comment(zh3, std::ptr::null_mut(), 0) }.is_null());
-        assert!(unsafe { zip_file_get_comment(zh3, idx as u64, std::ptr::null_mut(), 0) }.is_null());
+        assert!(
+            unsafe { zip_file_get_comment(zh3, idx as u64, std::ptr::null_mut(), 0) }.is_null()
+        );
         unsafe { zip_close(zh3) };
         std::fs::remove_file(&path).ok();
     }
@@ -7846,7 +7935,10 @@ mod tests {
 
         let zh2 = unsafe { zip_open(cpath.as_ptr(), 0, std::ptr::null_mut()) };
         assert!(!zh2.is_null());
-        assert_eq!(unsafe { zip_file_extra_fields_count(zh2, idx as u64, 0) }, 1);
+        assert_eq!(
+            unsafe { zip_file_extra_fields_count(zh2, idx as u64, 0) },
+            1
+        );
         let mut elen: u16 = 0;
         let p = unsafe { zip_file_extra_field_get_by_id(zh2, idx as u64, 0xCAFE, 0, &mut elen, 0) };
         assert!(!p.is_null(), "extra field must be present after reopen");
@@ -7881,7 +7973,10 @@ mod tests {
         let (zh3, idx3) = unsafe { open_single_file_archive(cpath.as_ptr()) };
         let dtime: u16 = (8 << 11) | (26 << 5) | (40 / 2); // 08:26:40
         let ddate: u16 = (40 << 9) | (9 << 5) | 13; // 2020-09-13
-        assert_eq!(unsafe { zip_file_set_dostime(zh3, idx3 as u64, dtime, ddate, 0) }, 0);
+        assert_eq!(
+            unsafe { zip_file_set_dostime(zh3, idx3 as u64, dtime, ddate, 0) },
+            0
+        );
         assert_eq!(unsafe { zip_close(zh3) }, 0);
 
         let zh4 = unsafe { zip_open(cpath.as_ptr(), 0, std::ptr::null_mut()) };
@@ -7943,12 +8038,8 @@ mod tests {
         // Two files with compressible content.
         let d0 = b"compress me compress me compress me ".repeat(40);
         let d1 = b"also compressible payload content ".repeat(40);
-        let s0 = unsafe {
-            zip_source_buffer(zh, d0.as_ptr() as *const c_void, d0.len() as u64, 0)
-        };
-        let s1 = unsafe {
-            zip_source_buffer(zh, d1.as_ptr() as *const c_void, d1.len() as u64, 0)
-        };
+        let s0 = unsafe { zip_source_buffer(zh, d0.as_ptr() as *const c_void, d0.len() as u64, 0) };
+        let s1 = unsafe { zip_source_buffer(zh, d1.as_ptr() as *const c_void, d1.len() as u64, 0) };
         assert_eq!(
             unsafe { zip_file_add(zh, CString::new("store.txt").unwrap().as_ptr(), s0, 0) },
             0
@@ -7961,8 +8052,14 @@ mod tests {
         unsafe { zip_source_free(s1) };
 
         // Per-entry Store (0) and Deflate level 9 (8).
-        assert_eq!(unsafe { zip_set_file_compression(zh, 0, ZIP_CM_STORE, 0) }, 0);
-        assert_eq!(unsafe { zip_set_file_compression(zh, 1, ZIP_CM_DEFLATE, 9) }, 0);
+        assert_eq!(
+            unsafe { zip_set_file_compression(zh, 0, ZIP_CM_STORE, 0) },
+            0
+        );
+        assert_eq!(
+            unsafe { zip_set_file_compression(zh, 1, ZIP_CM_DEFLATE, 9) },
+            0
+        );
         // Unsupported method -> ZIP_ER_COMPNOTSUPP (16).
         assert_eq!(unsafe { zip_set_file_compression(zh, 0, 99, 0) }, -1);
         assert_eq!(
@@ -8017,7 +8114,10 @@ mod tests {
         assert_eq!(unsafe { zip_file_extra_fields_count(zh, idx as u64, 0) }, 2);
 
         // Delete by index 0 (removes the 0xCAFE field).
-        assert_eq!(unsafe { zip_file_extra_field_delete(zh, idx as u64, 0, 0) }, 0);
+        assert_eq!(
+            unsafe { zip_file_extra_field_delete(zh, idx as u64, 0, 0) },
+            0
+        );
         assert_eq!(unsafe { zip_file_extra_fields_count(zh, idx as u64, 0) }, 1);
 
         // Deleting a nonexistent id returns an error, no panic.
@@ -8039,7 +8139,10 @@ mod tests {
         // Deletions persist after write/close/reopen.
         let zh2 = unsafe { zip_open(cpath.as_ptr(), 0, std::ptr::null_mut()) };
         assert!(!zh2.is_null());
-        assert_eq!(unsafe { zip_file_extra_fields_count(zh2, idx as u64, 0) }, 0);
+        assert_eq!(
+            unsafe { zip_file_extra_fields_count(zh2, idx as u64, 0) },
+            0
+        );
         unsafe { zip_close(zh2) };
         std::fs::remove_file(&path).ok();
     }
@@ -8081,7 +8184,11 @@ mod tests {
             str: std::ptr::null_mut(),
         };
         let zh = unsafe { zip_open_from_source(src, 0, &mut err) };
-        assert!(!zh.is_null(), "zip_open_from_source failed err={}", err.zip_err);
+        assert!(
+            !zh.is_null(),
+            "zip_open_from_source failed err={}",
+            err.zip_err
+        );
         let n = unsafe { zip_get_num_entries(zh, 0) } as u64;
         let mut out = Vec::with_capacity(n as usize);
         for i in 0..n {
@@ -8112,7 +8219,8 @@ mod tests {
 
         // Stdio file source = the parity ground truth for whole-buffer bytes
         // and per-entry reads.
-        let src_std = unsafe { zip_source_file_create(cpath.as_ptr(), 0, -1, std::ptr::null_mut()) };
+        let src_std =
+            unsafe { zip_source_file_create(cpath.as_ptr(), 0, -1, std::ptr::null_mut()) };
         assert!(!src_std.is_null(), "zip_source_file_create");
         assert_eq!(unsafe { read_source_all(src_std) }, ground_truth);
         unsafe { zip_source_free(src_std) };
@@ -8140,8 +8248,10 @@ mod tests {
         unsafe { zip_source_free(src_a) };
 
         // Wide create form with a non-ASCII (emoji) filename.
-        let wide_path =
-            dir.join(format!("phase8_\u{1F600}_parity_{}.zip", std::process::id()));
+        let wide_path = dir.join(format!(
+            "phase8_\u{1F600}_parity_{}.zip",
+            std::process::id()
+        ));
         std::fs::write(&wide_path, &ground_truth).unwrap();
         use std::os::windows::ffi::OsStrExt;
         let wide: Vec<u16> = wide_path
@@ -8158,7 +8268,7 @@ mod tests {
 
         // Handle create form (ownership of the HANDLE transfers to the source).
         let f = std::fs::File::open(&path).unwrap();
-        let handle = unsafe { IntoRawHandle::into_raw_handle(f) };
+        let handle = IntoRawHandle::into_raw_handle(f);
         let mut errp3: c_int = -1;
         let src_h = unsafe { zip_source_win32handle_create(handle, 0, -1, &mut errp3) };
         assert!(!src_h.is_null(), "win32handle_create errp={errp3}");
@@ -8181,7 +8291,7 @@ mod tests {
         unsafe { zip_source_free(src_w2) };
 
         let f2 = std::fs::File::open(&path).unwrap();
-        let handle2 = unsafe { IntoRawHandle::into_raw_handle(f2) };
+        let handle2 = IntoRawHandle::into_raw_handle(f2);
         let src_h2 = unsafe { zip_source_win32handle(zh, handle2, 0, -1) };
         assert!(!src_h2.is_null(), "zip_source_win32handle");
         assert_eq!(unsafe { read_source_all(src_h2) }, ground_truth);
@@ -8225,7 +8335,11 @@ mod tests {
 
         // Opening the archive from the fragment source reads every entry
         // identically to opening the contiguous file.
-        let mut err = zip_error { zip_err: 0, sys_err: 0, str: std::ptr::null_mut() };
+        let mut err = zip_error {
+            zip_err: 0,
+            sys_err: 0,
+            str: std::ptr::null_mut(),
+        };
         let zh = unsafe { zip_open_from_source(src, 0, &mut err) };
         assert!(!zh.is_null(), "open_from fragments err={}", err.zip_err);
         let cpath = CString::new(path.to_string_lossy().as_bytes()).unwrap();
@@ -8303,7 +8417,8 @@ mod tests {
 
         // Non-existent path -> NULL + OPEN (11).
         let mut errp5: c_int = 0;
-        let missing = CString::new(format!("Z:\\phase8_no_such_{}.zip", std::process::id())).unwrap();
+        let missing =
+            CString::new(format!("Z:\\phase8_no_such_{}.zip", std::process::id())).unwrap();
         let s5 = unsafe { zip_source_win32a_create(missing.as_ptr(), 0, -1, &mut errp5) };
         assert!(s5.is_null(), "missing path must fail");
         assert_eq!(errp5, ZipErrorCode::Open.as_i32());
@@ -8317,7 +8432,12 @@ mod tests {
         // Start beyond EOF -> NULL + INVAL (18).
         let mut errp7: c_int = 0;
         let s7 = unsafe {
-            zip_source_win32a_create(cpath.as_ptr(), ground_truth.len() as u64 + 1, -1, &mut errp7)
+            zip_source_win32a_create(
+                cpath.as_ptr(),
+                ground_truth.len() as u64 + 1,
+                -1,
+                &mut errp7,
+            )
         };
         assert!(s7.is_null(), "start beyond EOF must fail");
         assert_eq!(errp7, ZipErrorCode::Inval.as_i32());
@@ -8346,7 +8466,7 @@ mod tests {
             std::fs::write(&scratch, b"x").unwrap();
             std::fs::File::open(&scratch).unwrap()
         });
-        let closed = unsafe { IntoRawHandle::into_raw_handle(f) };
+        let closed = IntoRawHandle::into_raw_handle(f);
         // Wrap in a File and drop to close the OS handle.
         drop(unsafe { std::fs::File::from_raw_handle(closed) });
         let mut errp2: c_int = 0;
@@ -8370,9 +8490,12 @@ mod tests {
         assert!(s6.is_null());
 
         // NULL fragment data with non-empty length -> error, not panic.
-        let mut bad = zip_buffer_fragment { data: std::ptr::null_mut(), length: 16 };
+        let bad = zip_buffer_fragment {
+            data: std::ptr::null_mut(),
+            length: 16,
+        };
         let mut errp6: c_int = 0;
-        let s7 = unsafe { zip_buffer_fragment(&mut bad, 1, 0, &mut errp6) };
+        let s7 = unsafe { zip_buffer_fragment(&bad, 1, 0, &mut errp6) };
         assert!(s7.is_null(), "NULL fragment data must fail");
 
         // NULL fragment array with nfragments > 0 -> error, not panic.
@@ -8393,9 +8516,7 @@ mod tests {
         let ground_truth = std::fs::read(&path).unwrap();
 
         let mut errp: c_int = -1;
-        let src = unsafe {
-            zip_source_file_create(cpath.as_ptr(), 0, -1, &mut errp)
-        };
+        let src = unsafe { zip_source_file_create(cpath.as_ptr(), 0, -1, &mut errp) };
         assert!(!src.is_null(), "zip_source_file_create errp={errp}");
 
         // Seekable, not at EOF before read.
@@ -8427,8 +8548,7 @@ mod tests {
         let ground_truth = std::fs::read(&path).unwrap();
 
         let mut errp: c_int = -1;
-        let src =
-            unsafe { zip_source_file_create(cpath.as_ptr(), 10, 20, &mut errp) };
+        let src = unsafe { zip_source_file_create(cpath.as_ptr(), 10, 20, &mut errp) };
         assert!(!src.is_null());
         let bytes = unsafe { read_source_all(src) };
         assert_eq!(bytes, ground_truth[10..30].to_vec());
@@ -8453,25 +8573,26 @@ mod tests {
             fail_next_read: AtomicI32,
         }
 
-        unsafe extern "C" fn cb(
-            ud: *mut c_void,
-            data: *mut c_void,
-            len: u64,
-            cmd: c_int,
-        ) -> i64 {
+        unsafe extern "C" fn cb(ud: *mut c_void, data: *mut c_void, len: u64, cmd: c_int) -> i64 {
             let st = unsafe { &mut *(ud.cast::<FnState>()) };
             match cmd {
                 ZIP_SOURCE_OPEN => {
-                    st.open_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    st.open_count
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     st.pos.store(0, std::sync::atomic::Ordering::SeqCst);
                     0
                 }
                 ZIP_SOURCE_CLOSE => {
-                    st.close_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    st.close_count
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     0
                 }
                 ZIP_SOURCE_READ => {
-                    if st.fail_next_read.swap(0, std::sync::atomic::Ordering::SeqCst) != 0 {
+                    if st
+                        .fail_next_read
+                        .swap(0, std::sync::atomic::Ordering::SeqCst)
+                        != 0
+                    {
                         return -1;
                     }
                     let p = st.pos.load(std::sync::atomic::Ordering::SeqCst);
@@ -8503,12 +8624,11 @@ mod tests {
                     if target < 0 {
                         return -1;
                     }
-                    st.pos.store(target as usize, std::sync::atomic::Ordering::SeqCst);
+                    st.pos
+                        .store(target as usize, std::sync::atomic::Ordering::SeqCst);
                     0
                 }
-                ZIP_SOURCE_TELL => {
-                    st.pos.load(std::sync::atomic::Ordering::SeqCst) as i64
-                }
+                ZIP_SOURCE_TELL => st.pos.load(std::sync::atomic::Ordering::SeqCst) as i64,
                 ZIP_SOURCE_SUPPORTS => SRC_SEEKABLE,
                 ZIP_SOURCE_ERROR => 0,
                 ZIP_SOURCE_FREE => 0,
@@ -8532,7 +8652,11 @@ mod tests {
         };
         assert!(!src.is_null(), "zip_source_function_create errp={errp}");
 
-        assert_eq!(unsafe { zip_source_is_seekable(src) }, 1, "SUPPORTS seekable");
+        assert_eq!(
+            unsafe { zip_source_is_seekable(src) },
+            1,
+            "SUPPORTS seekable"
+        );
         let bytes = unsafe { read_source_all(src) };
         assert_eq!(bytes, DATA.to_vec(), "byte-identical to the slice");
         assert_eq!(
@@ -8551,14 +8675,22 @@ mod tests {
         assert_eq!(unsafe { zip_source_seek(src, 10, SEEK_SET) }, 0);
         assert_eq!(unsafe { zip_source_tell(src) }, 10);
         let mut b = [0u8; 5];
-        assert_eq!(unsafe { zip_source_read(src, b.as_mut_ptr() as *mut c_void, 5) }, 5);
+        assert_eq!(
+            unsafe { zip_source_read(src, b.as_mut_ptr() as *mut c_void, 5) },
+            5
+        );
         assert_eq!(&b, &DATA[10..15]);
         unsafe { zip_source_close(src) };
 
         // ERROR is reachable: a failing READ returns -1 without panicking.
-        state.fail_next_read.store(1, std::sync::atomic::Ordering::SeqCst);
+        state
+            .fail_next_read
+            .store(1, std::sync::atomic::Ordering::SeqCst);
         assert_eq!(unsafe { zip_source_open(src) }, 0);
-        assert_eq!(unsafe { zip_source_read(src, b.as_mut_ptr() as *mut c_void, 5) }, -1);
+        assert_eq!(
+            unsafe { zip_source_read(src, b.as_mut_ptr() as *mut c_void, 5) },
+            -1
+        );
         unsafe { zip_source_close(src) };
 
         unsafe { zip_source_free(src) };
@@ -8575,8 +8707,7 @@ mod tests {
         let full = std::fs::read(&path).unwrap();
 
         let mut errp: c_int = -1;
-        let base =
-            unsafe { zip_source_file_create(cpath.as_ptr(), 0, -1, &mut errp) };
+        let base = unsafe { zip_source_file_create(cpath.as_ptr(), 0, -1, &mut errp) };
         assert!(!base.is_null());
         let win = unsafe { zip_source_window_create(base, 5, 100, &mut errp) };
         assert!(!win.is_null(), "zip_source_window_create errp={errp}");
@@ -8595,7 +8726,10 @@ mod tests {
         assert_eq!(unsafe { zip_source_open(win) }, 0);
         assert_eq!(unsafe { zip_source_seek(win, 50, SEEK_SET) }, 0);
         let mut b = [0u8; 10];
-        assert_eq!(unsafe { zip_source_read(win, b.as_mut_ptr() as *mut c_void, 10) }, 10);
+        assert_eq!(
+            unsafe { zip_source_read(win, b.as_mut_ptr() as *mut c_void, 10) },
+            10
+        );
         assert_eq!(&b, &full[5 + 50..5 + 60]);
         unsafe { zip_source_close(win) };
         unsafe { zip_source_free(win) };
@@ -8615,23 +8749,32 @@ mod tests {
         assert!(!srcza.is_null());
 
         // Build an in-memory archive to receive the copied entry.
-        let dst = unsafe { zip_open(std::ptr::null_mut(), ZIP_CREATE | ZIP_TRUNCATE, std::ptr::null_mut()) };
+        let dst = unsafe {
+            zip_open(
+                std::ptr::null_mut(),
+                ZIP_CREATE | ZIP_TRUNCATE,
+                std::ptr::null_mut(),
+            )
+        };
         // The dest archive must have a path to write on close; use a temp file.
         let dst_path = temp_path("src_zip_dst");
         let dst_cpath = CString::new(dst_path.to_string_lossy().as_bytes()).unwrap();
         unsafe { zip_close(dst) };
-        let dst = unsafe { zip_open(dst_cpath.as_ptr(), ZIP_CREATE | ZIP_TRUNCATE, std::ptr::null_mut()) };
+        let dst = unsafe {
+            zip_open(
+                dst_cpath.as_ptr(),
+                ZIP_CREATE | ZIP_TRUNCATE,
+                std::ptr::null_mut(),
+            )
+        };
         assert!(!dst.is_null());
 
         let mut errp: c_int = -1;
-        let src =
-            unsafe { zip_source_zip_create(srcza, 0, 0, 0, -1, &mut errp) };
+        let src = unsafe { zip_source_zip_create(srcza, 0, 0, 0, -1, &mut errp) };
         assert!(!src.is_null(), "zip_source_zip_create errp={errp}");
 
         // Verify the source reads the entry's (decompressed) bytes exactly.
-        let expected = b"hello ffi read path content "
-            .repeat(20)
-            .to_vec();
+        let expected = b"hello ffi read path content ".repeat(20).to_vec();
         let got = unsafe { read_source_all(src) };
         assert_eq!(got, expected, "entry content byte-identical");
         unsafe { zip_source_free(src) };
@@ -8679,7 +8822,10 @@ mod tests {
 
         let mut errp: c_int = -1;
         let src = unsafe { zip_source_zip_create(za, 0, ZIP_FL_COMPRESSED, 0, -1, &mut errp) };
-        assert!(!src.is_null(), "zip_source_zip_create compressed errp={errp}");
+        assert!(
+            !src.is_null(),
+            "zip_source_zip_create compressed errp={errp}"
+        );
         let raw = unsafe { read_source_all(src) };
         unsafe { zip_source_free(src) };
 
@@ -8704,14 +8850,21 @@ mod tests {
         let mut errp: c_int = -1;
         let src = unsafe { zip_source_file_create(cpath.as_ptr(), 0, -1, &mut errp) };
         assert!(!src.is_null());
-        assert_eq!(unsafe { zip_source_is_seekable(src) }, 1, "file is seekable");
+        assert_eq!(
+            unsafe { zip_source_is_seekable(src) },
+            1,
+            "file is seekable"
+        );
 
         // Seek to an absolute offset and read; verify SEEK_SET/CUR/END.
         assert_eq!(unsafe { zip_source_open(src) }, 0);
         assert_eq!(unsafe { zip_source_seek(src, 100, SEEK_SET) }, 0);
         assert_eq!(unsafe { zip_source_tell(src) }, 100);
         let mut b = [0u8; 16];
-        assert_eq!(unsafe { zip_source_read(src, b.as_mut_ptr() as *mut c_void, 16) }, 16);
+        assert_eq!(
+            unsafe { zip_source_read(src, b.as_mut_ptr() as *mut c_void, 16) },
+            16
+        );
         assert_eq!(&b, &full[100..116]);
         assert_eq!(unsafe { zip_source_tell(src) }, 116);
         // SEEK_CUR.
@@ -8719,10 +8872,7 @@ mod tests {
         assert_eq!(unsafe { zip_source_tell(src) }, 126);
         // SEEK_END: offset is relative to the end (file size).
         assert_eq!(unsafe { zip_source_seek(src, -6, SEEK_END) }, 0);
-        assert_eq!(
-            unsafe { zip_source_tell(src) },
-            (full.len() - 6) as i64
-        );
+        assert_eq!(unsafe { zip_source_tell(src) }, (full.len() - 6) as i64);
         unsafe { zip_source_close(src) };
 
         // stat reports size and mtime; at_eof becomes 1 at end.
@@ -8750,12 +8900,16 @@ mod tests {
             -1
         }
         let mut errp: c_int = -1;
-        let src = unsafe { zip_source_function_create(Some(bad_cb), std::ptr::null_mut(), &mut errp) };
+        let src =
+            unsafe { zip_source_function_create(Some(bad_cb), std::ptr::null_mut(), &mut errp) };
         assert!(!src.is_null());
         // open/read/seek all return -1, never panic.
         assert_eq!(unsafe { zip_source_open(src) }, -1);
         let mut b = [0u8; 8];
-        assert_eq!(unsafe { zip_source_read(src, b.as_mut_ptr() as *mut c_void, 8) }, -1);
+        assert_eq!(
+            unsafe { zip_source_read(src, b.as_mut_ptr() as *mut c_void, 8) },
+            -1
+        );
         assert_eq!(unsafe { zip_source_seek(src, 0, SEEK_SET) }, -1);
         assert_eq!(unsafe { zip_source_tell(src) }, -1);
         unsafe { zip_source_free(src) };
@@ -8765,9 +8919,7 @@ mod tests {
         build_zip(&path);
         let cpath = CString::new(path.to_string_lossy().as_bytes()).unwrap();
         let full = std::fs::read(&path).unwrap();
-        let base = unsafe {
-            zip_source_file_create(cpath.as_ptr(), 0, -1, std::ptr::null_mut())
-        };
+        let base = unsafe { zip_source_file_create(cpath.as_ptr(), 0, -1, std::ptr::null_mut()) };
         assert!(!base.is_null());
         let win = unsafe {
             zip_source_window_create(base, 0, full.len() as i64 + 100, std::ptr::null_mut())
@@ -8781,9 +8933,7 @@ mod tests {
         let za = unsafe { zip_open(cpath.as_ptr(), 0, std::ptr::null_mut()) };
         assert!(!za.is_null());
         let mut errp2: c_int = -1;
-        let bad = unsafe {
-            zip_source_zip_create(za, 9999, 0, 0, -1, &mut errp2)
-        };
+        let bad = unsafe { zip_source_zip_create(za, 9999, 0, 0, -1, &mut errp2) };
         assert!(bad.is_null(), "invalid index must fail cleanly");
         unsafe { zip_close(za) };
         std::fs::remove_file(&path).ok();
@@ -8794,13 +8944,17 @@ mod tests {
     fn source_symbols_callable() {
         let path = temp_path("src_sym");
         build_zip(&path);
-        let cpath = CString::new(path.to_string_lossy().as_bytes()).unwrap();
 
         // zip_source_buffer + zip_source_free already covered elsewhere; here we
         // exercise keep/error/is_deleted/get_file_attributes on a buffer source.
         let data = b"symbol probe bytes".to_vec();
         let src = unsafe {
-            zip_source_buffer(std::ptr::null_mut(), data.as_ptr() as *const c_void, data.len() as u64, 0)
+            zip_source_buffer(
+                std::ptr::null_mut(),
+                data.as_ptr() as *const c_void,
+                data.len() as u64,
+                0,
+            )
         };
         assert!(!src.is_null());
         unsafe { zip_source_keep(src) };
@@ -8828,7 +8982,7 @@ mod tests {
 
         // zip_source_filep_create over a FILE*.
         let cf = std::ffi::CString::new(path.to_string_lossy().as_bytes()).unwrap();
-        let file = unsafe { libc::fopen(cf.as_ptr(), b"rb".as_ptr() as *const c_char) };
+        let file = unsafe { libc::fopen(cf.as_ptr(), b"rb\0".as_ptr() as *const c_char) };
         assert!(!file.is_null());
         let mut errp2: c_int = -1;
         let fsrc = unsafe { zip_source_filep_create(file, 0, -1, &mut errp2) };
@@ -8916,8 +9070,14 @@ mod tests {
                 0,
             )
         };
-        let layered2 =
-            unsafe { zip_source_layered(std::ptr::null_mut(), base2, Some(passthrough_layered_cb), std::ptr::null_mut()) };
+        let layered2 = unsafe {
+            zip_source_layered(
+                std::ptr::null_mut(),
+                base2,
+                Some(passthrough_layered_cb),
+                std::ptr::null_mut(),
+            )
+        };
         assert!(!layered2.is_null());
         let got2 = unsafe { read_source_all(layered2) };
         assert_eq!(got2, data);
@@ -8946,7 +9106,10 @@ mod tests {
         assert_eq!(unsafe { zip_source_seek_write(src, 5, SEEK_SET) }, 0);
         assert_eq!(unsafe { zip_source_tell_write(src) }, 5);
         let c = b"Z";
-        assert_eq!(unsafe { zip_source_write(src, c.as_ptr() as *const c_void, 1) }, 1);
+        assert_eq!(
+            unsafe { zip_source_write(src, c.as_ptr() as *const c_void, 1) },
+            1
+        );
         assert_eq!(unsafe { zip_source_commit_write(src) }, 0);
         let got = unsafe { read_source_all(src) };
         assert_eq!(got, b"helloZworld");
@@ -9036,8 +9199,7 @@ mod tests {
         let cpath = CString::new(path.to_string_lossy().as_bytes()).unwrap();
 
         let mut errp: c_int = -1;
-        let file_src =
-            unsafe { zip_source_file_create(cpath.as_ptr(), 0, -1, &mut errp) };
+        let file_src = unsafe { zip_source_file_create(cpath.as_ptr(), 0, -1, &mut errp) };
         assert!(!file_src.is_null());
         // window over the whole file (takes ownership of file_src).
         let win = unsafe { zip_source_window_create(file_src, 0, -1, &mut errp) };
@@ -9052,12 +9214,20 @@ mod tests {
         // The pipeline output must equal the deterministic writer codec output.
         let got = unsafe { read_source_all(comp) };
         let expected = zip_core::compress_bytes(&full, CompressionMethod::Deflate, 6).unwrap();
-        assert_eq!(got, expected, "pipeline compressed output must match writer");
+        assert_eq!(
+            got, expected,
+            "pipeline compressed output must match writer"
+        );
 
         // Reading the compressed bytes back yields the original.
         let mut back = Vec::new();
-        zip_core::codec::decode_slice_into(&got, CompressionMethod::Deflate, got.len() as u64, &mut back)
-            .unwrap();
+        zip_core::codec::decode_slice_into(
+            &got,
+            CompressionMethod::Deflate,
+            got.len() as u64,
+            &mut back,
+        )
+        .unwrap();
         assert_eq!(back, full);
 
         unsafe { zip_source_free(comp) };
@@ -9086,21 +9256,39 @@ mod tests {
                 | src_bit(ZIP_SOURCE_TELL)
         );
         // The exported fixed-arity symbol sets bit cmd0.
-        assert_eq!(unsafe { zip_source_make_command_bitmap(ZIP_SOURCE_READ) }, src_bit(ZIP_SOURCE_READ));
+        assert_eq!(
+            unsafe { zip_source_make_command_bitmap(ZIP_SOURCE_READ) },
+            src_bit(ZIP_SOURCE_READ)
+        );
 
         // seek_compute_offset across whence.
-        let mut args = ZipSourceArgsSeek { offset: 10, whence: SEEK_SET };
+        let mut args = ZipSourceArgsSeek {
+            offset: 10,
+            whence: SEEK_SET,
+        };
         let mut errp: c_int = 0;
         assert_eq!(
             unsafe {
-                zip_source_seek_compute_offset(0, 100, (&mut args) as *mut _ as *mut c_void, std::mem::size_of::<ZipSourceArgsSeek>() as u64, &mut errp)
+                zip_source_seek_compute_offset(
+                    0,
+                    100,
+                    (&mut args) as *mut _ as *mut c_void,
+                    std::mem::size_of::<ZipSourceArgsSeek>() as u64,
+                    &mut errp,
+                )
             },
             10
         );
         args.whence = SEEK_CUR;
         assert_eq!(
             unsafe {
-                zip_source_seek_compute_offset(20, 100, (&mut args) as *mut _ as *mut c_void, std::mem::size_of::<ZipSourceArgsSeek>() as u64, &mut errp)
+                zip_source_seek_compute_offset(
+                    20,
+                    100,
+                    (&mut args) as *mut _ as *mut c_void,
+                    std::mem::size_of::<ZipSourceArgsSeek>() as u64,
+                    &mut errp,
+                )
             },
             30
         );
@@ -9108,7 +9296,13 @@ mod tests {
         args.offset = -5;
         assert_eq!(
             unsafe {
-                zip_source_seek_compute_offset(0, 100, (&mut args) as *mut _ as *mut c_void, std::mem::size_of::<ZipSourceArgsSeek>() as u64, &mut errp)
+                zip_source_seek_compute_offset(
+                    0,
+                    100,
+                    (&mut args) as *mut _ as *mut c_void,
+                    std::mem::size_of::<ZipSourceArgsSeek>() as u64,
+                    &mut errp,
+                )
             },
             95
         );
@@ -9117,7 +9311,13 @@ mod tests {
         args.offset = 200;
         assert_eq!(
             unsafe {
-                zip_source_seek_compute_offset(0, 100, (&mut args) as *mut _ as *mut c_void, std::mem::size_of::<ZipSourceArgsSeek>() as u64, &mut errp)
+                zip_source_seek_compute_offset(
+                    0,
+                    100,
+                    (&mut args) as *mut _ as *mut c_void,
+                    std::mem::size_of::<ZipSourceArgsSeek>() as u64,
+                    &mut errp,
+                )
             },
             -1
         );
@@ -9138,20 +9338,29 @@ mod tests {
         };
         // OPEN + READ via pass_to_lower_layer.
         assert_eq!(
-            unsafe { zip_source_pass_to_lower_layer(lower, std::ptr::null_mut(), 0, ZIP_SOURCE_OPEN) },
+            unsafe {
+                zip_source_pass_to_lower_layer(lower, std::ptr::null_mut(), 0, ZIP_SOURCE_OPEN)
+            },
             0
         );
         let mut buf = [0u8; 6];
         assert_eq!(
             unsafe {
-                zip_source_pass_to_lower_layer(lower, buf.as_mut_ptr() as *mut c_void, 6, ZIP_SOURCE_READ)
+                zip_source_pass_to_lower_layer(
+                    lower,
+                    buf.as_mut_ptr() as *mut c_void,
+                    6,
+                    ZIP_SOURCE_READ,
+                )
             },
             6
         );
         assert_eq!(&buf, b"forwar");
         // Write-mode commands -> OPNOTSUPP (-1).
         assert_eq!(
-            unsafe { zip_source_pass_to_lower_layer(lower, std::ptr::null_mut(), 0, ZIP_SOURCE_WRITE) },
+            unsafe {
+                zip_source_pass_to_lower_layer(lower, std::ptr::null_mut(), 0, ZIP_SOURCE_WRITE)
+            },
             -1
         );
         unsafe { zip_source_free(lower) };
@@ -9181,8 +9390,9 @@ mod tests {
         };
         let mut errp: c_int = -1;
         // SUPPORTS < 0 => creation fails cleanly (NULL), no panic.
-        let layered =
-            unsafe { zip_source_layered_create(base, Some(bad_layered_cb), std::ptr::null_mut(), &mut errp) };
+        let layered = unsafe {
+            zip_source_layered_create(base, Some(bad_layered_cb), std::ptr::null_mut(), &mut errp)
+        };
         assert!(layered.is_null(), "invalid SUPPORTS must fail creation");
 
         // begin_write on an already-open source -> -1, no panic.
@@ -9250,7 +9460,11 @@ mod tests {
             str: std::ptr::null_mut(),
         };
         let zh = unsafe { zip_open_from_source(src, 0, &mut err) };
-        assert!(!zh.is_null(), "zip_open_from_source failed err={}", err.zip_err);
+        assert!(
+            !zh.is_null(),
+            "zip_open_from_source failed err={}",
+            err.zip_err
+        );
         assert_eq!(err.zip_err, 0);
         assert_eq!(unsafe { zip_get_num_entries(zh, 0) }, 3);
         assert_eq!(unsafe { read_archive_entries(zh) }, ground);
@@ -9277,7 +9491,11 @@ mod tests {
             str: std::ptr::null_mut(),
         };
         let zh = unsafe { zip_open_from_source(src, 0, &mut err) };
-        assert!(!zh.is_null(), "zip_open_from_source failed err={}", err.zip_err);
+        assert!(
+            !zh.is_null(),
+            "zip_open_from_source failed err={}",
+            err.zip_err
+        );
         assert_eq!(err.zip_err, 0);
         assert_eq!(unsafe { read_archive_entries(zh) }, ground);
         unsafe { zip_close(zh) };
@@ -9310,7 +9528,10 @@ mod tests {
             // `zip_strerror` on a failed (null) handle isn't meaningful; check
             // the message embedded in the zip_error struct instead.
             assert!(!err.str.is_null());
-            assert_eq!(unsafe { CStr::from_ptr(err.str).to_str().unwrap() }, want_str);
+            assert_eq!(
+                unsafe { CStr::from_ptr(err.str).to_str().unwrap() },
+                want_str
+            );
             unsafe { zip_source_free(src) };
         };
 
@@ -9348,8 +9569,13 @@ mod tests {
         let cpath = CString::new(path.to_string_lossy().as_bytes()).unwrap();
         let ground = unsafe { read_archive_entries_by_path(&path) };
 
-        // Open the file on a raw C-runtime fd.
-        let fd = unsafe { libc::open(cpath.as_ptr(), libc::O_RDONLY | libc::O_BINARY) };
+        // Open the file on a raw C-runtime fd. O_BINARY is Windows-only; on
+        // POSIX systems binary mode is the default and the flag does not exist.
+        #[cfg(windows)]
+        let flags = libc::O_RDONLY | libc::O_BINARY;
+        #[cfg(not(windows))]
+        let flags = libc::O_RDONLY;
+        let fd = unsafe { libc::open(cpath.as_ptr(), flags) };
         assert!(fd >= 0, "libc::open failed");
         let mut errp: c_int = -1;
         let zh = unsafe { zip_fdopen(fd, 0, &mut errp) };
@@ -9424,7 +9650,7 @@ mod tests {
     fn fdopen_malformed_no_panic() {
         // Invalid fd (-1) -> dup fails -> ZIP_ER_OPEN (11), no panic.
         let mut errp: c_int = -1;
-        let zh = unsafe { zip_fdopen(-1, 0, &mut errp) };
+        let _zh = unsafe { zip_fdopen(-1, 0, &mut errp) };
         assert_eq!(errp, ZipErrorCode::Open.as_i32());
 
         // Unsupported flags -> ZIP_ER_INVAL (18), no panic.
@@ -9471,14 +9697,8 @@ mod tests {
     /// Add a buffer source with `data` as an entry named `name` to archive `zh`.
     unsafe fn add_buffer_entry(zh: H, name: &str, data: &[u8]) -> i64 {
         let cname = CString::new(name).unwrap();
-        let src = unsafe {
-            zip_source_buffer(
-                zh,
-                data.as_ptr() as *const c_void,
-                data.len() as u64,
-                0,
-            )
-        };
+        let src =
+            unsafe { zip_source_buffer(zh, data.as_ptr() as *const c_void, data.len() as u64, 0) };
         assert!(!src.is_null(), "zip_source_buffer failed");
         let idx = unsafe { zip_file_add(zh, cname.as_ptr(), src, 0) };
         assert!(idx >= 0, "zip_file_add failed");
@@ -9490,7 +9710,11 @@ mod tests {
     unsafe fn open_write_archive(path: &std::path::Path) -> H {
         let cpath = CString::new(path.to_string_lossy().as_bytes()).unwrap();
         let zh = unsafe {
-            zip_open(cpath.as_ptr(), ZIP_CREATE | ZIP_TRUNCATE, std::ptr::null_mut())
+            zip_open(
+                cpath.as_ptr(),
+                ZIP_CREATE | ZIP_TRUNCATE,
+                std::ptr::null_mut(),
+            )
         };
         assert!(!zh.is_null(), "zip_open(create) failed");
         zh
@@ -9507,7 +9731,7 @@ mod tests {
         let zh = unsafe { open_write_archive(&path) };
 
         let ud: usize = 0xCAFE_1234;
-        *PROGRESS_STATE.lock().unwrap() = ud as usize;
+        *PROGRESS_STATE.lock().unwrap() = ud;
         let r = unsafe {
             zip_register_progress_callback_with_state(
                 zh,
@@ -9618,9 +9842,9 @@ mod tests {
         let zh = unsafe { open_write_archive(&path) };
 
         let prog_ud: usize = 0xDEAD_BEEF;
-        *PROGRESS_STATE.lock().unwrap() = prog_ud as usize;
+        *PROGRESS_STATE.lock().unwrap() = prog_ud;
         let cancel_ud: usize = 0x0BAD_F00D;
-        *CANCEL_STATE.lock().unwrap() = cancel_ud as usize;
+        *CANCEL_STATE.lock().unwrap() = cancel_ud;
         CANCEL_FLAG.store(0, Ordering::Relaxed); // do not cancel
 
         unsafe {
@@ -9748,24 +9972,13 @@ mod tests {
         // Registering NULL/None callbacks must be a no-op success.
         assert_eq!(
             unsafe {
-                zip_register_progress_callback_with_state(
-                    zh,
-                    0.0,
-                    None,
-                    None,
-                    std::ptr::null_mut(),
-                )
+                zip_register_progress_callback_with_state(zh, 0.0, None, None, std::ptr::null_mut())
             },
             0
         );
         assert_eq!(
             unsafe {
-                zip_register_cancel_callback_with_state(
-                    zh,
-                    None,
-                    None,
-                    std::ptr::null_mut(),
-                )
+                zip_register_cancel_callback_with_state(zh, None, None, std::ptr::null_mut())
             },
             0
         );

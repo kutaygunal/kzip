@@ -506,7 +506,13 @@ fn write_compressed_hooked(
     let cdir_offset = out.len() as u64;
     out.extend_from_slice(&cdir);
     let cdir_size = cdir.len() as u64;
-    write_eocd(compressed.len() as u16, cdir_size, cdir_offset, archive_comment, &mut out);
+    write_eocd(
+        compressed.len() as u16,
+        cdir_size,
+        cdir_offset,
+        archive_comment,
+        &mut out,
+    );
     Ok(out)
 }
 
@@ -525,7 +531,8 @@ fn write_local_header(cf: &CompressedFile, out: &mut Vec<u8>) -> Result<()> {
     let crc = if aes { 0 } else { cf.crc };
     let version_needed = if aes { 51u16 } else { 20u16 };
     let extra = build_extra(cf)?;
-    let extra_len = u16::try_from(extra.len()).map_err(|_| ZipError::new(ZipErrorCode::Eftoolarge))?;
+    let extra_len =
+        u16::try_from(extra.len()).map_err(|_| ZipError::new(ZipErrorCode::Eftoolarge))?;
     out.extend_from_slice(&magic::LOCAL);
     out.extend_from_slice(&version_needed.to_le_bytes());
     out.extend_from_slice(&flags.to_le_bytes()); // bit flags
@@ -557,7 +564,8 @@ fn write_central_entry(cf: &CompressedFile, offset: u64, cdir: &mut Vec<u8>) -> 
     let crc = if aes { 0 } else { cf.crc };
     let version_needed = if aes { 51u16 } else { 20u16 };
     let extra = build_extra(cf)?;
-    let extra_len = u16::try_from(extra.len()).map_err(|_| ZipError::new(ZipErrorCode::Eftoolarge))?;
+    let extra_len =
+        u16::try_from(extra.len()).map_err(|_| ZipError::new(ZipErrorCode::Eftoolarge))?;
     let comment = cf.comment.as_deref().unwrap_or(&[]);
     let comment_len =
         u16::try_from(comment.len()).map_err(|_| ZipError::new(ZipErrorCode::Eftoolarge))?;
@@ -919,15 +927,8 @@ mod tests {
             samples.push((completed, total));
             false
         };
-        let out = write_archive_full_with_progress(
-            &files,
-            &opts,
-            &[],
-            &[],
-            &[],
-            Some(&mut poll),
-        )
-        .unwrap();
+        let out = write_archive_full_with_progress(&files, &opts, &[], &[], &[], Some(&mut poll))
+            .unwrap();
 
         assert!(
             samples.len() >= 2,
@@ -943,7 +944,10 @@ mod tests {
         assert_eq!(final_c, final_t, "final callback must reach total (1.0)");
 
         // Determinism gate (TC-4): registering a no-op hook changes nothing.
-        assert_eq!(out, base, "registering a non-cancelling poll must not change bytes");
+        assert_eq!(
+            out, base,
+            "registering a non-cancelling poll must not change bytes"
+        );
     }
 
     /// TC-2 (in-process): a poll that requests cancellation aborts with
@@ -958,15 +962,8 @@ mod tests {
             calls += 1;
             true
         };
-        let err = write_archive_full_with_progress(
-            &files,
-            &opts,
-            &[],
-            &[],
-            &[],
-            Some(&mut poll),
-        )
-        .unwrap_err();
+        let err = write_archive_full_with_progress(&files, &opts, &[], &[], &[], Some(&mut poll))
+            .unwrap_err();
         assert_eq!(err.code(), ZipErrorCode::Cancelled);
         assert!(calls >= 1);
     }
@@ -997,8 +994,8 @@ mod tests {
     fn callbacks_malformed_no_panic() {
         let opts = CompressOptions::default();
         // None poll (no callbacks registered): plain success, no panic.
-        let out = write_archive_full_with_progress(&sample_files(), &opts, &[], &[], &[], None)
-            .unwrap();
+        let out =
+            write_archive_full_with_progress(&sample_files(), &opts, &[], &[], &[], None).unwrap();
         assert!(out.len() > 22);
 
         // Poll that always requests cancellation (garbage non-zero): clean

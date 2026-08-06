@@ -40,7 +40,7 @@ enum Inner {
 /// A streaming reader for a single archive entry's decompressed content.
 ///
 /// Implements [`Read`]; on reaching EOF it verifies the uncompressed size and
-/// CRC-32, returning [`ZipErrorCode::Crc`] on mismatch (mirroring libzip).
+/// CRC-32, returning [`crate::error::ZipErrorCode::Crc`] on mismatch (mirroring libzip).
 pub struct EntryReader {
     inner: Inner,
     crc: crc32fast::Hasher,
@@ -351,7 +351,6 @@ mod tests {
         let mut out = Vec::new();
         assert!(r.read_to_end(&mut out).is_err());
     }
-
 
     /// A buffered reader supports seeking; a seeked reader skips the
     /// end-of-stream integrity check (it may no longer span the full entry).

@@ -226,13 +226,13 @@ impl Source for DecryptingSource {
 // - HMAC-SHA1 is computed over the CIPHERTEXT and the first 10 bytes (AE-2)
 //   are stored as the authentication tag.
 
-use aes::cipher::generic_array::{typenum::U16, GenericArray};
-use aes::cipher::{BlockEncrypt, BlockSizeUser, KeyInit};
-use aes::{Aes128, Aes192, Aes256};
 use crate::constant::{
     encryption, WINZIP_AES_HMAC_LENGTH, WINZIP_AES_PASSWORD_VERIFY_LENGTH,
     WINZIP_AES_PBKDF2_ITERATIONS,
 };
+use aes::cipher::generic_array::{typenum::U16, GenericArray};
+use aes::cipher::{BlockEncrypt, BlockSizeUser, KeyInit};
+use aes::{Aes128, Aes192, Aes256};
 use hmac::{Hmac, Mac};
 use pbkdf2::pbkdf2_hmac;
 use sha1::Sha1;
@@ -295,7 +295,12 @@ fn derive_aes_keys(
     let key_length = aes_key_length(method);
     let mut buf = [0u8; 2 * 32 + WINZIP_AES_PASSWORD_VERIFY_LENGTH]; // max AES-256
     let out_len = 2 * key_length + WINZIP_AES_PASSWORD_VERIFY_LENGTH;
-    pbkdf2_hmac::<Sha1>(password, salt, WINZIP_AES_PBKDF2_ITERATIONS, &mut buf[..out_len]);
+    pbkdf2_hmac::<Sha1>(
+        password,
+        salt,
+        WINZIP_AES_PBKDF2_ITERATIONS,
+        &mut buf[..out_len],
+    );
     aes_key.copy_from_slice(&buf[..key_length]);
     hmac_key.copy_from_slice(&buf[key_length..2 * key_length]);
     password_verify.copy_from_slice(&buf[2 * key_length..out_len]);
@@ -367,12 +372,7 @@ pub fn random_salt(len: usize) -> Vec<u8> {
 /// `[salt][pwd_verify][ciphertext][hmac]`. `salt` must be `aes_salt_length(method)`
 /// bytes. Returns the full encrypted region (the caller stores it as the entry's
 /// data; its length is the entry's compressed size).
-pub fn aes_encrypt_data(
-    password: &[u8],
-    method: u16,
-    data: &[u8],
-    salt: &[u8],
-) -> Vec<u8> {
+pub fn aes_encrypt_data(password: &[u8], method: u16, data: &[u8], salt: &[u8]) -> Vec<u8> {
     let key_length = aes_key_length(method);
     let salt_length = aes_salt_length(method);
     let mut aes_key = [0u8; 32];
@@ -392,8 +392,8 @@ pub fn aes_encrypt_data(
     aes_ctr_apply(method, &aes_key[..key_length], &mut ciphertext);
 
     // HMAC-SHA1 over the ciphertext; keep the first 10 bytes (AE-2).
-    let mut mac = <HmacSha1 as Mac>::new_from_slice(&hmac_key[..key_length])
-        .expect("valid HMAC key");
+    let mut mac =
+        <HmacSha1 as Mac>::new_from_slice(&hmac_key[..key_length]).expect("valid HMAC key");
     mac.update(&ciphertext);
     let tag = mac.finalize().into_bytes();
 
@@ -414,14 +414,14 @@ pub fn aes_encrypt_data(
 pub fn aes_decrypt_data(password: &[u8], method: u16, data: &[u8]) -> Result<Vec<u8>> {
     let key_length = aes_key_length(method);
     let salt_length = aes_salt_length(method);
-    let aux =
-        salt_length + WINZIP_AES_PASSWORD_VERIFY_LENGTH + WINZIP_AES_HMAC_LENGTH;
+    let aux = salt_length + WINZIP_AES_PASSWORD_VERIFY_LENGTH + WINZIP_AES_HMAC_LENGTH;
     if data.len() < aux {
         return Err(ZipError::new(ZipErrorCode::TruncatedZip));
     }
     let salt = &data[..salt_length];
     let stored_verify = &data[salt_length..salt_length + WINZIP_AES_PASSWORD_VERIFY_LENGTH];
-    let ciphertext = &data[salt_length + WINZIP_AES_PASSWORD_VERIFY_LENGTH..data.len() - WINZIP_AES_HMAC_LENGTH];
+    let ciphertext =
+        &data[salt_length + WINZIP_AES_PASSWORD_VERIFY_LENGTH..data.len() - WINZIP_AES_HMAC_LENGTH];
     let stored_hmac = &data[data.len() - WINZIP_AES_HMAC_LENGTH..];
 
     let mut aes_key = [0u8; 32];
@@ -525,7 +525,8 @@ mod tests {
         header.copy_from_slice(&encrypted[..ENCRYPTION_HEADER_LEN]);
         crypto.decrypt(&mut header);
 
-        let inner: Box<dyn Source> = Box::new(Cursor::new(encrypted[ENCRYPTION_HEADER_LEN..].to_vec()));
+        let inner: Box<dyn Source> =
+            Box::new(Cursor::new(encrypted[ENCRYPTION_HEADER_LEN..].to_vec()));
         let mut dec = DecryptingSource::new(inner, crypto);
         let mut out = Vec::new();
         dec.read_to_end(&mut out).unwrap();
@@ -544,12 +545,9 @@ mod tests {
         let salt = [0x7d, 0x7a, 0x78, 0x41, 0x12, 0x73, 0xc2, 0x69];
         let region = [
             // salt
-            0x7d, 0x7a, 0x78, 0x41, 0x12, 0x73, 0xc2, 0x69,
-            // password verify
-            0x1d, 0xcc,
-            // ciphertext
-            0x99, 0x9a, 0x8d, 0x75, 0x92, 0x4d, 0x67, 0xa5, 0xd5, 0x86,
-            // hmac
+            0x7d, 0x7a, 0x78, 0x41, 0x12, 0x73, 0xc2, 0x69, // password verify
+            0x1d, 0xcc, // ciphertext
+            0x99, 0x9a, 0x8d, 0x75, 0x92, 0x4d, 0x67, 0xa5, 0xd5, 0x86, // hmac
             0x94, 0xe5, 0x72, 0x1c, 0xf7, 0xea, 0x31, 0xa0, 0x61, 0x3b,
         ];
         let plain = aes_decrypt_data(password, method, &region).unwrap();

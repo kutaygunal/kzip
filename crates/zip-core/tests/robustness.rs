@@ -250,7 +250,9 @@ fn metadata_malformed_no_panic() {
         let name = b"a.txt";
         let mut v = Vec::new();
         v.extend_from_slice(&zip_core::constant::magic::CENTRAL);
-        v.extend_from_slice(&[20u16.to_le_bytes(), 20u16.to_le_bytes(), 0u16.to_le_bytes()].concat());
+        v.extend_from_slice(
+            &[20u16.to_le_bytes(), 20u16.to_le_bytes(), 0u16.to_le_bytes()].concat(),
+        );
         v.extend_from_slice(&0u16.to_le_bytes()); // method
         v.extend_from_slice(&[0u8; 4]); // time/date
         v.extend_from_slice(&0u32.to_le_bytes()); // crc
@@ -269,10 +271,7 @@ fn metadata_malformed_no_panic() {
         let res = Dirent::parse_central(&mut c);
         // Either a parse error (Incons/Eof) or success is acceptable; panic is not.
         if let Err(e) = res {
-            assert!(matches!(
-                e.code(),
-                ZipErrorCode::Incons | ZipErrorCode::Eof
-            ));
+            assert!(matches!(e.code(), ZipErrorCode::Incons | ZipErrorCode::Eof));
         }
     }
 

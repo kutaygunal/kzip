@@ -117,11 +117,7 @@ impl Archive {
         // The 8 real ZIP_STAT_* bits libzip sets, not all 32 bits. WinZip AES
         // AE-2 entries have no valid CRC, so the ZIP_STAT_CRC (0x20) bit is
         // cleared (libzip reports 0xDF for those), exactly like C.
-        let valid: u64 = if d.crc_valid {
-            0xFF
-        } else {
-            0xFF & !0x20u64
-        };
+        let valid: u64 = if d.crc_valid { 0xFF } else { 0xFF & !0x20u64 };
         Ok(Stat {
             index: Some(index),
             name: Some(d.filename.clone()),
@@ -192,11 +188,7 @@ impl Archive {
 
     /// Read the full decompressed content of the entry at `index`, using
     /// `password` for encrypted entries. `None` falls back to the default.
-    pub fn read_entry_with_password(
-        &self,
-        index: u64,
-        password: Option<&[u8]>,
-    ) -> Result<Vec<u8>> {
+    pub fn read_entry_with_password(&self, index: u64, password: Option<&[u8]>) -> Result<Vec<u8>> {
         let mut r = self.open_entry_with_password(index, password)?;
         let mut out = Vec::new();
         r.read_to_end(&mut out)?;
@@ -432,9 +424,8 @@ pub fn unix_to_dos(ut: u64) -> (u16, u16) {
     if year < 1980 {
         year = 1980; // libzip clamps tm_year to >= 80
     }
-    let dos_date = (((year - 1980) as u16) << 9)
-        | ((local.month() as u16) << 5)
-        | (local.day() as u16);
+    let dos_date =
+        (((year - 1980) as u16) << 9) | ((local.month() as u16) << 5) | (local.day() as u16);
     let dos_time = ((local.hour() as u16) << 11)
         | ((local.minute() as u16) << 5)
         | ((local.second() as u16) >> 1);
@@ -934,7 +925,7 @@ mod tests {
         v.push(b'a'); // name
         v.extend_from_slice(&[0u8; 12]); // header (garbage)
         v.extend_from_slice(&[1u8, 2, 3]); // truncated ciphertext
-        // Central dir + EOCD for a single entry.
+                                           // Central dir + EOCD for a single entry.
         let cdir_offset = v.len() as u64;
         v.extend_from_slice(&magic::CENTRAL);
         v.extend_from_slice(&(3u16 << 8 | 20u16).to_le_bytes());
@@ -972,11 +963,7 @@ mod tests {
 
     /// Build a WinZip AES-encrypted archive (all entries encrypted with
     /// `method`, e.g. AES-128/192/256) using `password`.
-    fn aes_archive(
-        files: &[(&str, Vec<u8>)],
-        password: &[u8],
-        method: u16,
-    ) -> Vec<u8> {
+    fn aes_archive(files: &[(&str, Vec<u8>)], password: &[u8], method: u16) -> Vec<u8> {
         let afiles = files
             .iter()
             .map(|(n, d)| ArchiveFile::new(*n, d.clone()))

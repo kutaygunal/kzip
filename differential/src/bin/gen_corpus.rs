@@ -240,7 +240,8 @@ fn generate_encrypted_with_c(
     // Mirror ground truth and build ArchiveFiles.
     let mut files = Vec::with_capacity(entries.len());
     for (i, (name, data, method, level)) in entries.iter().enumerate() {
-        std::fs::write(in_dir.join(format!("{i}")), data).map_err(|e| format!("write input: {e}"))?;
+        std::fs::write(in_dir.join(format!("{i}")), data)
+            .map_err(|e| format!("write input: {e}"))?;
         let cm = match *method {
             CM_STORE => CompressionMethod::Store,
             _ => CompressionMethod::Deflate,
@@ -291,7 +292,8 @@ fn generate_aes_with_rust(
 
     let mut files = Vec::with_capacity(entries.len());
     for (i, (name, data, _cm, _level)) in entries.iter().enumerate() {
-        std::fs::write(in_dir.join(format!("{i}")), data).map_err(|e| format!("write input: {e}"))?;
+        std::fs::write(in_dir.join(format!("{i}")), data)
+            .map_err(|e| format!("write input: {e}"))?;
         files.push(ArchiveFile::new(name.clone(), data.clone()));
     }
     let opts = CompressOptions {
@@ -301,8 +303,9 @@ fn generate_aes_with_rust(
         ..Default::default()
     };
     let methods = vec![method; files.len()];
-    let bytes = zip_core::write_archive_encrypted_methods(&files, &opts, password.as_bytes(), &methods)
-        .map_err(|e| format!("write_archive_encrypted_methods failed: {e}"))?;
+    let bytes =
+        zip_core::write_archive_encrypted_methods(&files, &opts, password.as_bytes(), &methods)
+            .map_err(|e| format!("write_archive_encrypted_methods failed: {e}"))?;
     std::fs::write(&out_path, &bytes).map_err(|e| e.to_string())?;
     Ok(out_path)
 }

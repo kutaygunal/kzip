@@ -233,8 +233,9 @@ fn rust_writes_c_reads(api: &CReadApi, corpus: &Path) -> Vec<ArchiveCheck> {
 
     // ZipCrypto-encrypted archive.
     let enc = vec![true; files.len()];
-    let enc_bytes = zip_core::write_archive_encrypted(&files, &opts, KZIP_TEST_PASSWORD.as_bytes(), &enc)
-        .expect("write_archive_encrypted");
+    let enc_bytes =
+        zip_core::write_archive_encrypted(&files, &opts, KZIP_TEST_PASSWORD.as_bytes(), &enc)
+            .expect("write_archive_encrypted");
     let enc_dir = corpus.join("inputs").join("rust_zipcrypto");
     std::fs::create_dir_all(&enc_dir).unwrap();
     let enc_path = rust_dir.join("rust_zipcrypto.zip");
@@ -268,7 +269,12 @@ fn rust_writes_c_reads(api: &CReadApi, corpus: &Path) -> Vec<ArchiveCheck> {
 /// Read `zip_path` (written by Rust) with the C library and verify every
 /// entry matches `files`. When `encrypted`, the C library is told the default
 /// password so `zip_fopen_index` decrypts.
-fn check_c_reads(api: &CReadApi, zip_path: &std::path::Path, files: &[ArchiveFile], encrypted: bool) -> ArchiveCheck {
+fn check_c_reads(
+    api: &CReadApi,
+    zip_path: &std::path::Path,
+    files: &[ArchiveFile],
+    encrypted: bool,
+) -> ArchiveCheck {
     let cpath = CString::new(zip_path.to_string_lossy().as_bytes()).unwrap();
     let mut errp: i32 = 0;
     let zh = unsafe { (api.zip_open)(cpath.as_ptr(), 0, &mut errp) };
