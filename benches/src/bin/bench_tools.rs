@@ -7,6 +7,7 @@
 //!     EXTRACT (read all entries) in-process.
 //!   * 7-Zip, Info-ZIP (ZIP-format, same-format comparison) via wall-clock.
 //!   * Zstandard, LZ4 (non-ZIP container, general-compression CONTEXT ONLY).
+//!
 //! Writes `results/benchmark-zip-tools.csv` and `results/zip-tools-benchmark.md`.
 //!
 //! All wall-clock timings use the median of several iterations. Output sizes are
@@ -60,7 +61,7 @@ fn random(rng: &mut XorShift, n: usize) -> Vec<u8> {
 /// Build a deterministic representative corpus: mix of compressible text and
 /// incompressible random data, ~60-100 MiB, 104 files.
 fn build_corpus() -> Vec<CorpusFile> {
-    let mut rng = XorShift(0x7B71_C0FE_0DD_CAFE);
+    let mut rng = XorShift(0x07B7_1C0F_E0DD_CAFE);
     let mut files = Vec::new();
     for i in 0..N_TEXT {
         let n = 512 * 1024 + (rng.next_u64() % (512 * 1024)) as usize; // 512KiB..1MiB
@@ -593,11 +594,11 @@ fn main() {
          the reference for the others; see the table for the exact multiplier.\n",
         kzip_comp.median_secs * 1000.0
     ));
-    md.push_str(&format!(
+    md.push_str(
         "- **Where kzip is strong.** For in-process/embedded use it avoids process-spawn \
          overhead and keeps everything in memory; extract throughput is the strongest signal. \
          Its DEFLATE ratio is comparable to the ZIP peers (see ratio column).\n",
-    ));
+    );
     md.push_str(
         "- **Where 7-Zip / zstd win.** 7-Zip generally packs a tighter DEFLATE stream and its \
          multi-threaded default makes large, multi-file compresses very fast. Zstandard and LZ4 \
