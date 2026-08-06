@@ -19,16 +19,22 @@ Win32 sources were added since the original 2026-08-04 report).
 
 ## Summary
 
+> **Update (2026):** The **read_random** workload was previously C-faster (0.79×). After the
+> read-path optimizations P0–P4 (lightweight header skip, shared file handle, smaller decode
+> buffer, cached data offsets, and an mmap-backed zero-copy source), read_random is now
+> **1.92× faster than C** (598.2 vs 310.9 MiB/s). All other rows were re-measured on the same
+> machine and are stable/no-regression.
+
 | # | Workload | C libzip 1.11.4 | Rust zip-core 0.1.0 | Ratio (Rust/C) | Verdict |
 |---|----------|-----------------|---------------------|----------------|---------|
-| 1 | Compress small files (1–64 KiB, 3000 files) | 431.8 MiB/s | 644.1 MiB/s | **1.49×** | Rust **faster** |
-| 2 | Compress large single file (1 GiB) | 376.3 MiB/s | 873.8 MiB/s | **2.32×** | Rust **faster** |
-| 3a | Compress mixed corpus (96 files, serial) | 382.8 MiB/s | 859.4 MiB/s | **2.24×** | Rust **faster** |
-| 3b | Compress mixed corpus (Rust **parallel**, 24 workers) | — | 5987.9 MiB/s | 15.64× vs C | Rust **much faster** (parallel) |
-| 4 | Read / extract full archive (128 entries) | 2230.6 MiB/s | 4745.4 MiB/s | **2.13×** | Rust **faster** |
-| 5 | Read random entries (2000 of 10k) | 323.3 MiB/s | 255.9 MiB/s | **0.79×** | C **faster** |
-| 6 | Modify in place (add/delete/rename) | 8.95 ms | 9.15 ms | ~1.02× (wall) | **parity** (see note) |
-| 7 | Memory peak, 10k-entry archive | RSS Δ ≈ 0 MiB (limitation) | compress 10.2 MiB / read 0.05 MiB | — | Rust bounded; C RSS n/a |
+| 1 | Compress small files (1–64 KiB, 3000 files) | 433.7 MiB/s | 647.1 MiB/s | **1.49×** | Rust **faster** |
+| 2 | Compress large single file (1 GiB) | 368.6 MiB/s | 861.7 MiB/s | **2.34×** | Rust **faster** |
+| 3a | Compress mixed corpus (96 files, serial) | 381.2 MiB/s | 843.2 MiB/s | **2.21×** | Rust **faster** |
+| 3b | Compress mixed corpus (Rust **parallel**, 24 workers) | — | 5896.3 MiB/s | 15.47× vs C | Rust **much faster** (parallel) |
+| 4 | Read / extract full archive (128 entries) | 2142.0 MiB/s | 4998.4 MiB/s | **2.33×** | Rust **faster** |
+| 5 | Read random entries (2000 of 10k) | 310.9 MiB/s | 598.2 MiB/s | **1.92×** | Rust **faster** |
+| 6 | Modify in place (add/delete/rename) | 9.55 ms | 9.69 ms | ~1.01× (wall) | **parity** (see note) |
+| 7 | Memory peak, 10k-entry archive | RSS Δ ≈ 0 MiB (limitation) | compress 10.1 MiB / read 0.0 MiB | — | Rust bounded; C RSS n/a |
 | 8 | Async (zip-async / tokio) streaming | — | — | — | **DEFERRED** (see §8) |
 
 ---
