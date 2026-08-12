@@ -325,7 +325,7 @@ fn method_to_u16(m: CompressionMethod) -> u16 {
 // ---------------------------------------------------------------------------
 // ArchiveWriter: emit a complete, valid ZIP archive from compressed files.
 // Used by integration tests and the async adapter's read round-trip. This is a
-// minimal, deterministic writer (no ZIP64, fixed DOS time of 0, no encryption).
+// deterministic writer with ZIP64 and encryption support.
 // ---------------------------------------------------------------------------
 
 /// Write a complete ZIP archive containing `files`, compressed per `opts`.
@@ -492,31 +492,55 @@ fn write_compressed_hooked(
 ) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     let mut cdir = Vec::new();
+    let mut local_offsets = Vec::with_capacity(compressed.len());
 
     for cf in compressed {
         if let Some(p) = progress.as_deref_mut() {
             p.report()?;
         }
         let offset = out.len() as u64;
-        write_local_header(cf, &mut out)?;
+        local_offsets.push(offset);
+        let entry_zip64 = needs_zip64_sizes(cf);
+        write_local_header(cf, &mut out, entry_zip64)?;
         out.extend_from_slice(&cf.data);
+        if crate::crypto::is_aes_method(cf.encryption_method) {
+            write_data_descriptor(cf, entry_zip64, &mut out);
+        }
         write_central_entry(cf, offset, &mut cdir)?;
     }
 
     let cdir_offset = out.len() as u64;
     out.extend_from_slice(&cdir);
     let cdir_size = cdir.len() as u64;
-    write_eocd(
-        compressed.len() as u16,
-        cdir_size,
-        cdir_offset,
-        archive_comment,
-        &mut out,
-    );
+    let need_zip64 = compressed.len() > u16::MAX as usize
+        || cdir_size > u32::MAX as u64
+        || cdir_offset > u32::MAX as u64
+        || compressed
+            .iter()
+            .zip(local_offsets.iter())
+            .any(|(cf, &offset)| needs_zip64_sizes(cf) || offset > u32::MAX as u64);
+    if need_zip64 {
+        let zip64_eocd_offset = cdir_offset + cdir_size;
+        crate::cdir::write_eocd64(compressed.len() as u64, cdir_size, cdir_offset, &mut out);
+        crate::cdir::write_eocd64_locator(zip64_eocd_offset, &mut out);
+        crate::cdir::write_eocd_zip64_sentinel(compressed.len() as u64, archive_comment, &mut out);
+    } else {
+        write_eocd(
+            compressed.len() as u16,
+            cdir_size,
+            cdir_offset,
+            archive_comment,
+            &mut out,
+        );
+    }
     Ok(out)
 }
 
-fn write_local_header(cf: &CompressedFile, out: &mut Vec<u8>) -> Result<()> {
+fn needs_zip64_sizes(cf: &CompressedFile) -> bool {
+    cf.comp_size > u32::MAX as u64 || cf.uncomp_size > u32::MAX as u64
+}
+
+fn write_local_header(cf: &CompressedFile, out: &mut Vec<u8>, entry_zip64: bool) -> Result<()> {
     let aes = crate::crypto::is_aes_method(cf.encryption_method);
     let flags = if cf.encryption_method != 0 {
         if aes {
@@ -529,8 +553,14 @@ fn write_local_header(cf: &CompressedFile, out: &mut Vec<u8>) -> Result<()> {
     };
     let method = on_disk_method(cf);
     let crc = if aes { 0 } else { cf.crc };
-    let version_needed = if aes { 51u16 } else { 20u16 };
-    let extra = build_extra(cf)?;
+    let version_needed = if aes {
+        51u16
+    } else if entry_zip64 {
+        45u16
+    } else {
+        20u16
+    };
+    let extra = build_extra(cf, entry_zip64, false, 0)?;
     let extra_len =
         u16::try_from(extra.len()).map_err(|_| ZipError::new(ZipErrorCode::Eftoolarge))?;
     out.extend_from_slice(&magic::LOCAL);
@@ -540,8 +570,18 @@ fn write_local_header(cf: &CompressedFile, out: &mut Vec<u8>) -> Result<()> {
     out.extend_from_slice(&cf.last_mod_time.to_le_bytes()); // dos time
     out.extend_from_slice(&cf.last_mod_date.to_le_bytes()); // dos date
     out.extend_from_slice(&crc.to_le_bytes());
-    out.extend_from_slice(&(cf.comp_size as u32).to_le_bytes());
-    out.extend_from_slice(&(cf.uncomp_size as u32).to_le_bytes());
+    let comp_size = if entry_zip64 {
+        u32::MAX
+    } else {
+        cf.comp_size as u32
+    };
+    let uncomp_size = if entry_zip64 {
+        u32::MAX
+    } else {
+        cf.uncomp_size as u32
+    };
+    out.extend_from_slice(&comp_size.to_le_bytes());
+    out.extend_from_slice(&uncomp_size.to_le_bytes());
     out.extend_from_slice(&(cf.name.len() as u16).to_le_bytes());
     out.extend_from_slice(&extra_len.to_le_bytes()); // extra len
     out.extend_from_slice(cf.name.as_bytes());
@@ -562,8 +602,15 @@ fn write_central_entry(cf: &CompressedFile, offset: u64, cdir: &mut Vec<u8>) -> 
     };
     let method = on_disk_method(cf);
     let crc = if aes { 0 } else { cf.crc };
-    let version_needed = if aes { 51u16 } else { 20u16 };
-    let extra = build_extra(cf)?;
+    let entry_zip64 = needs_zip64_sizes(cf) || offset > u32::MAX as u64;
+    let version_needed = if aes {
+        51u16
+    } else if entry_zip64 {
+        45u16
+    } else {
+        20u16
+    };
+    let extra = build_extra(cf, entry_zip64, true, offset)?;
     let extra_len =
         u16::try_from(extra.len()).map_err(|_| ZipError::new(ZipErrorCode::Eftoolarge))?;
     let comment = cf.comment.as_deref().unwrap_or(&[]);
@@ -577,15 +624,30 @@ fn write_central_entry(cf: &CompressedFile, offset: u64, cdir: &mut Vec<u8>) -> 
     cdir.extend_from_slice(&cf.last_mod_time.to_le_bytes()); // dos time
     cdir.extend_from_slice(&cf.last_mod_date.to_le_bytes()); // dos date
     cdir.extend_from_slice(&crc.to_le_bytes());
-    cdir.extend_from_slice(&(cf.comp_size as u32).to_le_bytes());
-    cdir.extend_from_slice(&(cf.uncomp_size as u32).to_le_bytes());
+    let comp_size = if cf.comp_size > u32::MAX as u64 {
+        u32::MAX
+    } else {
+        cf.comp_size as u32
+    };
+    let uncomp_size = if cf.uncomp_size > u32::MAX as u64 {
+        u32::MAX
+    } else {
+        cf.uncomp_size as u32
+    };
+    let offset32 = if offset > u32::MAX as u64 {
+        u32::MAX
+    } else {
+        offset as u32
+    };
+    cdir.extend_from_slice(&comp_size.to_le_bytes());
+    cdir.extend_from_slice(&uncomp_size.to_le_bytes());
     cdir.extend_from_slice(&(cf.name.len() as u16).to_le_bytes());
     cdir.extend_from_slice(&extra_len.to_le_bytes()); // extra len
     cdir.extend_from_slice(&comment_len.to_le_bytes()); // comment len
     cdir.extend_from_slice(&0u16.to_le_bytes()); // disk number
     cdir.extend_from_slice(&0u16.to_le_bytes()); // internal attrs
     cdir.extend_from_slice(&cf.external_attributes.to_le_bytes()); // external attrs
-    cdir.extend_from_slice(&(offset as u32).to_le_bytes());
+    cdir.extend_from_slice(&offset32.to_le_bytes());
     cdir.extend_from_slice(cf.name.as_bytes());
     cdir.extend_from_slice(&extra);
     cdir.extend_from_slice(comment);
@@ -595,7 +657,12 @@ fn write_central_entry(cf: &CompressedFile, offset: u64, cdir: &mut Vec<u8>) -> 
 /// Build the raw extra-field block for an entry: user extra fields (excluding
 /// the internal ZIP64/AES ones the writer manages itself) followed by the
 /// WinZip AES `0x9901` block when the entry is AES-encrypted.
-fn build_extra(cf: &CompressedFile) -> Result<Vec<u8>> {
+fn build_extra(
+    cf: &CompressedFile,
+    entry_zip64: bool,
+    central: bool,
+    offset: u64,
+) -> Result<Vec<u8>> {
     let mut extra = Vec::new();
     for (id, data) in &cf.extra_fields {
         if *id == EF_WINZIP_AES || *id == EXTRA_FIELD_ZIP64 {
@@ -611,7 +678,43 @@ fn build_extra(cf: &CompressedFile) -> Result<Vec<u8>> {
             extra.extend_from_slice(&aes_ef);
         }
     }
+    if entry_zip64 {
+        let need_uncomp = cf.uncomp_size > u32::MAX as u64;
+        let need_comp = cf.comp_size > u32::MAX as u64;
+        // Local headers carry only size values. Central records additionally
+        // carry the local-header offset when it overflows its 32-bit field.
+        let need_offset = central && offset > u32::MAX as u64;
+        let mut data = Vec::new();
+        if need_uncomp {
+            data.extend_from_slice(&cf.uncomp_size.to_le_bytes());
+        }
+        if need_comp {
+            data.extend_from_slice(&cf.comp_size.to_le_bytes());
+        }
+        if need_offset {
+            data.extend_from_slice(&offset.to_le_bytes());
+        }
+        if !data.is_empty() {
+            let len =
+                u16::try_from(data.len()).map_err(|_| ZipError::new(ZipErrorCode::Eftoolarge))?;
+            extra.extend_from_slice(&EXTRA_FIELD_ZIP64.to_le_bytes());
+            extra.extend_from_slice(&len.to_le_bytes());
+            extra.extend_from_slice(&data);
+        }
+    }
     Ok(extra)
+}
+
+fn write_data_descriptor(cf: &CompressedFile, zip64: bool, out: &mut Vec<u8>) {
+    out.extend_from_slice(&magic::DATA_DESCRIPTOR);
+    out.extend_from_slice(&0u32.to_le_bytes());
+    if zip64 {
+        out.extend_from_slice(&cf.comp_size.to_le_bytes());
+        out.extend_from_slice(&cf.uncomp_size.to_le_bytes());
+    } else {
+        out.extend_from_slice(&(cf.comp_size as u32).to_le_bytes());
+        out.extend_from_slice(&(cf.uncomp_size as u32).to_le_bytes());
+    }
 }
 
 /// The on-disk compression-method field: for WinZip AES entries this is the
@@ -1032,5 +1135,76 @@ mod tests {
             r.read_to_end(&mut out).unwrap();
             assert_eq!(out, f.data, "roundtrip content mismatch for {}", f.name);
         }
+    }
+
+    #[test]
+    fn zip64_entry_headers_preserve_overflow_values() {
+        let cf = CompressedFile {
+            name: "large.bin".to_string(),
+            method: 0,
+            crc: 0,
+            comp_size: u32::MAX as u64 + 1,
+            uncomp_size: u32::MAX as u64 + 2,
+            data: Vec::new(),
+            encryption_method: 0,
+            comment: None,
+            extra_fields: Vec::new(),
+            last_mod_time: 0,
+            last_mod_date: 0,
+            opsys: 3,
+            external_attributes: 0,
+        };
+
+        let mut local = Vec::new();
+        write_local_header(&cf, &mut local, true).unwrap();
+        let (local_entry, _) =
+            crate::dirent::Dirent::parse_local(&mut Cursor::new(&local)).unwrap();
+        assert_eq!(local_entry.comp_size, cf.comp_size);
+        assert_eq!(local_entry.uncomp_size, cf.uncomp_size);
+
+        let mut central = Vec::new();
+        write_central_entry(&cf, u32::MAX as u64 + 3, &mut central).unwrap();
+        let central_entry =
+            crate::dirent::Dirent::parse_central(&mut Cursor::new(&central)).unwrap();
+        assert_eq!(central_entry.comp_size, cf.comp_size);
+        assert_eq!(central_entry.uncomp_size, cf.uncomp_size);
+        assert_eq!(central_entry.offset, u32::MAX as u64 + 3);
+    }
+
+    #[test]
+    fn zip64_entry_count_roundtrips() {
+        let files: Vec<_> = (0..=u16::MAX)
+            .map(|i| ArchiveFile::new(format!("{i}.txt"), Vec::new()))
+            .collect();
+        let opts = CompressOptions {
+            method: CompressionMethod::Store,
+            parallel: false,
+            ..Default::default()
+        };
+        let bytes = write_archive(&files, &opts).unwrap();
+        assert!(bytes.windows(4).any(|w| w == magic::EOCD64));
+        assert!(bytes.windows(4).any(|w| w == magic::EOCD64_LOCATOR));
+        let archive = Archive::open(Cursor::new(bytes)).unwrap();
+        assert_eq!(archive.len(), files.len() as u64);
+    }
+
+    #[test]
+    fn aes_entries_emit_their_data_descriptor() {
+        let files = vec![ArchiveFile::new("secret.txt", b"descriptor".repeat(32))];
+        let bytes = write_archive_encrypted_methods(
+            &files,
+            &CompressOptions::default(),
+            b"password",
+            &[crate::constant::encryption::AES_256],
+        )
+        .unwrap();
+        assert!(bytes.windows(4).any(|w| w == magic::DATA_DESCRIPTOR));
+        let archive = Archive::open(Cursor::new(bytes)).unwrap();
+        let mut reader = archive
+            .open_entry_with_password(0, Some(b"password"))
+            .unwrap();
+        let mut decoded = Vec::new();
+        reader.read_to_end(&mut decoded).unwrap();
+        assert_eq!(decoded, files[0].data);
     }
 }

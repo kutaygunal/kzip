@@ -2714,6 +2714,33 @@ pub unsafe extern "C" fn zip_source_buffer(
     )
 }
 
+/// Create a buffer-backed source without an archive handle, reporting an
+/// error through `errorp` when construction fails.
+///
+/// This is the modern `_create` spelling from libzip. The source owns a copy
+/// of the input bytes, matching the ownership model used by
+/// [`zip_source_buffer`].
+///
+/// # Safety
+///
+/// `data` must point to `len` readable bytes (or be NULL when `len == 0`), and
+/// `errorp`, when non-null, must point to writable caller-owned error storage.
+#[no_mangle]
+pub unsafe extern "C" fn zip_source_buffer_create(
+    data: *const c_void,
+    len: u64,
+    freep: c_int,
+    errorp: *mut zip_error,
+) -> H {
+    let source = zip_source_buffer(std::ptr::null_mut(), data, len, freep);
+    if source.is_null() && !errorp.is_null() {
+        unsafe { zip_error_set(errorp, ZipErrorCode::Inval.as_i32(), 0) };
+    } else if !errorp.is_null() {
+        unsafe { zip_error_set(errorp, ZipErrorCode::Ok.as_i32(), 0) };
+    }
+    source
+}
+
 // ---------------------------------------------------------------------------
 // Phase 8: buffer-fragment source (`zip_source_buffer_fragment` family) +
 // `zip_buffer_fragment` alias.
@@ -4805,6 +4832,26 @@ pub unsafe extern "C" fn zip_rename(zh: H, index: u64, name: *const c_char) -> c
     )
 }
 
+/// Rename an entry using libzip's modern flag-bearing API.
+///
+/// The current Rust overlay has one rename behavior, so supported flags are
+/// accepted for ABI compatibility and the operation is delegated to the
+/// existing rename implementation.
+///
+/// # Safety
+///
+/// `zh` must be a valid writable archive handle and `name` must point to a
+/// NUL-terminated string readable by the call.
+#[no_mangle]
+pub unsafe extern "C" fn zip_file_rename(
+    zh: H,
+    index: u64,
+    name: *const c_char,
+    _flags: u32,
+) -> c_int {
+    zip_rename(zh, index, name)
+}
+
 /// Replace the entry at `index` with the data from `source` (applied on
 /// [`zip_close`]).
 ///
@@ -4833,6 +4880,39 @@ pub unsafe extern "C" fn zip_file_replace(zh: H, index: u64, source: H, _flags: 
         },
         -1,
     )
+}
+
+/// Deprecated alias for [`zip_file_add`] with no flags.
+///
+/// # Safety
+///
+/// `zh` must be a valid writable archive handle, `name` a NUL-terminated
+/// string, and `source` a valid source handle.
+#[no_mangle]
+pub unsafe extern "C" fn zip_add(zh: H, name: *const c_char, source: H) -> i64 {
+    zip_file_add(zh, name, source, 0)
+}
+
+/// Deprecated alias for [`zip_dir_add`] with no flags.
+///
+/// # Safety
+///
+/// `zh` must be a valid writable archive handle and `name` a NUL-terminated
+/// string.
+#[no_mangle]
+pub unsafe extern "C" fn zip_add_dir(zh: H, name: *const c_char) -> i64 {
+    zip_dir_add(zh, name, 0)
+}
+
+/// Deprecated alias for [`zip_file_replace`] with no flags.
+///
+/// # Safety
+///
+/// `zh` must be a valid writable archive handle and `source` a valid source
+/// handle for an existing entry.
+#[no_mangle]
+pub unsafe extern "C" fn zip_replace(zh: H, index: u64, source: H) -> c_int {
+    zip_file_replace(zh, index, source, 0)
 }
 
 /// Discard all pending changes and free the archive handle without writing.
@@ -5176,6 +5256,31 @@ pub unsafe extern "C" fn zip_error_to_str(
         },
         -1,
     )
+}
+
+/// Serialize a `zip_error_t` as two native-endian `int` values: ZIP error
+/// code followed by system error code.
+///
+/// # Safety
+///
+/// `ze` must point to a valid error object. `data` must point to at least two
+/// writable `c_int` values when `length` is sufficient.
+#[no_mangle]
+pub unsafe extern "C" fn zip_error_to_data(
+    ze: *const zip_error,
+    data: *mut c_void,
+    length: u64,
+) -> i64 {
+    let int_size = std::mem::size_of::<c_int>() as u64;
+    if ze.is_null() || data.is_null() || length < int_size.saturating_mul(2) {
+        return -1;
+    }
+    unsafe {
+        let out = data.cast::<c_int>();
+        *out = (*ze).zip_err;
+        *out.add(1) = (*ze).sys_err;
+    }
+    int_size.saturating_mul(2) as i64
 }
 
 /// Return the system-error type of a `zip_error_t` (`ZIP_ET_NONE`/`ZIP_ET_SYS`).
@@ -6920,6 +7025,89 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    /// The remaining low-risk libzip 1.11.4 entry/source/error symbols behave
+    /// like their modern counterparts and preserve the caller-owned error
+    /// object's lifetime rules.
+    #[test]
+    fn ffi_remaining_abi_shims() {
+        let mut ze = zip_error {
+            zip_err: 0,
+            sys_err: 0,
+            str: std::ptr::null_mut(),
+        };
+        unsafe { zip_error_init(&mut ze) };
+
+        let payload = b"source-create";
+        let source = unsafe {
+            zip_source_buffer_create(payload.as_ptr().cast(), payload.len() as u64, 0, &mut ze)
+        };
+        assert!(!source.is_null());
+        assert_eq!(
+            unsafe { zip_error_code_zip(&ze) },
+            ZipErrorCode::Ok.as_i32()
+        );
+        unsafe { zip_source_free(source) };
+
+        let bad = unsafe { zip_source_buffer_create(std::ptr::null(), 1, 0, &mut ze) };
+        assert!(bad.is_null());
+        assert_eq!(
+            unsafe { zip_error_code_zip(&ze) },
+            ZipErrorCode::Inval.as_i32()
+        );
+
+        let mut encoded = [0 as c_int; 2];
+        unsafe { zip_error_set(&mut ze, ZipErrorCode::Read.as_i32(), 37) };
+        assert_eq!(
+            unsafe {
+                zip_error_to_data(
+                    &ze,
+                    encoded.as_mut_ptr().cast(),
+                    std::mem::size_of_val(&encoded) as u64,
+                )
+            },
+            (std::mem::size_of_val(&encoded)) as i64
+        );
+        assert_eq!(encoded, [ZipErrorCode::Read.as_i32(), 37]);
+        unsafe { zip_error_fini(&mut ze) };
+
+        let path = temp_path("remaining_abi_shims");
+        std::fs::remove_file(&path).ok();
+        build_zip(&path);
+        let cpath = CString::new(path.to_string_lossy().as_bytes()).unwrap();
+        let zh = unsafe { zip_open(cpath.as_ptr(), ZIP_CREATE, std::ptr::null_mut()) };
+        assert!(!zh.is_null());
+        let first = unsafe {
+            let source = zip_source_buffer(zh, b"first".as_ptr().cast(), 5, 0);
+            assert!(!source.is_null());
+            let name = CString::new("first.txt").unwrap();
+            let index = zip_add(zh, name.as_ptr(), source);
+            zip_source_free(source);
+            index
+        };
+        assert!(first >= 0);
+        let dir_name = CString::new("folder/").unwrap();
+        assert!(unsafe { zip_add_dir(zh, dir_name.as_ptr()) } >= 0);
+
+        let replacement = unsafe {
+            let source = zip_source_buffer(zh, b"second".as_ptr().cast(), 6, 0);
+            assert!(!source.is_null());
+            let result = zip_replace(zh, 0, source);
+            zip_source_free(source);
+            result
+        };
+        assert_eq!(replacement, 0);
+        let renamed = CString::new("renamed.txt").unwrap();
+        assert_eq!(unsafe { zip_file_rename(zh, 0, renamed.as_ptr(), 0) }, 0);
+        assert_eq!(unsafe { zip_close(zh) }, 0);
+
+        let read_zh = unsafe { zip_open(cpath.as_ptr(), 0, std::ptr::null_mut()) };
+        assert!(!read_zh.is_null());
+        assert_eq!(unsafe { zip_get_num_files(read_zh) }, 5);
+        assert_eq!(unsafe { zip_name_locate(read_zh, renamed.as_ptr(), 0) }, 0);
+        unsafe { zip_close(read_zh) };
+        std::fs::remove_file(&path).ok();
+    }
+
     /// `zip_fseek`/`zip_ftell`/`zip_file_is_seekable` on an open entry.
     #[test]
     fn ffi_fseek_ftell_seekable() {
@@ -7575,6 +7763,13 @@ mod tests {
             "zip_buffer_fragment",
             "zip_source_buffer_fragment",
             "zip_source_buffer_fragment_create",
+            // Remaining low-risk libzip 1.11.4 ABI compatibility shims.
+            "zip_file_rename",
+            "zip_source_buffer_create",
+            "zip_error_to_data",
+            "zip_add",
+            "zip_add_dir",
+            "zip_replace",
         ] {
             let found: Result<libloading::Symbol<*mut libc::c_void>, _> =
                 unsafe { lib.get(sym.as_bytes()) };

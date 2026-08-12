@@ -81,19 +81,18 @@ comparison below describes capabilities, not runtime speed:
 | Rust API | Not applicable. | Ownership-based `Result` API over `Read`/`Seek` sources. |
 | C API | Full libzip API for the release. | Implemented compatibility subset in `zip-sys`; see [`docs/ABI.md`](docs/ABI.md). |
 | Archive operations | Read, create, modify, revert, and close/write. | Read, create, modify, comments, metadata, and supported revert/edit operations. |
-| ZIP formats | ZIP and ZIP64 read/write. | ZIP and ZIP64 reading; ZIP64 writing remains an open compatibility gap. |
+| ZIP formats | ZIP and ZIP64 read/write. | ZIP and ZIP64 read/write, including ZIP64 entry counts, overflowing sizes, offsets, and AES data descriptors. |
 | Codecs | Store, DEFLATE, Bzip2, LZMA, and Zstandard when configured. | Store, DEFLATE, and Bzip2; LZMA and Zstandard are not currently implemented. |
 | Encryption | Traditional PKWARE encryption and WinZip AES. | Traditional PKWARE encryption and WinZip AES-128/192/256. |
 | Sources | Broad `zip_source_*` family, including file, callback, layered, and window sources. | Rust `Source` abstractions and the implemented `zip-sys` source functions; not every libzip source symbol is exported. |
 | Parallelism | Library API is primarily synchronous; applications choose their own concurrency. | Optional Rayon-based parallel compression with deterministic archive ordering. |
 | Safety model | C callers own memory and handle lifetime. | Safe core APIs; C callers still need normal FFI ownership and lifetime discipline. |
 
-Known ABI differences are intentionally documented rather than hidden. In
-addition to ZIP64 writing, the current compatibility layer still has a small
-number of missing or legacy-only entry points, such as `zip_file_rename`,
-`zip_source_buffer_create`, `zip_error_to_data`, and deprecated add/replace
-aliases. Treat `zip-sys` as a supported subset until the exact header and
-symbol status says otherwise.
+Known ABI differences are intentionally documented rather than hidden. The
+compatibility layer still differs from a complete libzip build in optional
+codec availability, some backend-specific flags, and the breadth of source
+constructors. Treat `zip-sys` as a supported subset and use the shipped header
+as the exact symbol contract.
 
 ## Comparing behavior with the original C library
 

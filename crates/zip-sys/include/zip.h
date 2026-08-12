@@ -13,10 +13,13 @@
  *   zip_fopen, zip_fopen_index, zip_fread, zip_fclose,
  *   zip_stat, zip_stat_index, zip_stat_init, zip_libzip_version,
  *   zip_file_add, zip_dir_add, zip_delete, zip_rename, zip_file_replace,
+ *   zip_file_rename, zip_add, zip_add_dir, zip_replace,
  *   zip_discard, zip_source_buffer, zip_source_free,
+ *   zip_source_buffer_create,
  *   zip_get_error, zip_error_init, zip_error_init_with_code, zip_error_clear,
  *   zip_error_set, zip_error_strerror, zip_error_code_zip, zip_error_code_system,
  *   zip_error_fini, zip_error_to_str, zip_error_system_type, zip_error_get,
+ *   zip_error_to_data,
  *   zip_error_set_from_source,
  *   zip_fseek, zip_ftell, zip_file_is_seekable,
  *   zip_compression_method_supported, zip_encryption_method_supported,
@@ -111,8 +114,10 @@ enum {
     ZIP_ER_TELL = 30,
     ZIP_ER_COMPRESSED_DATA = 31,
     ZIP_ER_CANCELLED = 32,
-    ZIP_ER_DATA_DESCRIPTOR = 33,
-    ZIP_ER_WRONZIP = 34,
+    ZIP_ER_DATA_LENGTH = 33,
+    ZIP_ER_NOT_ALLOWED = 34,
+    ZIP_ER_TRUNCATED_ZIP = 35,
+    ZIP_ER_EF_TOO_LARGE = 36,
 };
 
 /* zip_open flags. */
@@ -189,6 +194,7 @@ int zip_error_code_system(const zip_error_t *);
 int zip_error_system_type(const zip_error_t *);
 void zip_error_fini(zip_error_t *);
 int zip_error_to_str(char *, zip_uint64_t, int, int);
+zip_int64_t zip_error_to_data(const zip_error_t *, void *, zip_uint64_t);
 void zip_error_get(zip_t *, int *, int *);
 
 /* ---- entry reading ---- */
@@ -256,6 +262,8 @@ int zip_file_set_encryption(zip_t *, zip_uint64_t index, zip_uint16_t method);
 /* Create a buffer-backed source from data[0..len] (copied; freep ignored). */
 zip_source_t *zip_source_buffer(zip_t *, const void *data, zip_uint64_t len,
                                 int freep);
+zip_source_t *zip_source_buffer_create(const void *data, zip_uint64_t len,
+                                       int freep, zip_error_t *errorp);
 
 /* Release a source created by zip_source_buffer. */
 void zip_source_free(zip_source_t *);
@@ -273,10 +281,17 @@ int zip_delete(zip_t *, zip_uint64_t index);
 
 /* Rename the entry at `index` to `name` (applied on close). */
 int zip_rename(zip_t *, zip_uint64_t index, const char *name);
+int zip_file_rename(zip_t *, zip_uint64_t index, const char *name,
+                    zip_flags_t flags);
 
 /* Replace the entry at `index` with the data from `source` (applied on close). */
 int zip_file_replace(zip_t *, zip_uint64_t index, zip_source_t *,
                      zip_flags_t flags);
+
+/* Deprecated aliases retained for source compatibility. */
+zip_int64_t zip_add(zip_t *, const char *name, zip_source_t *);
+zip_int64_t zip_add_dir(zip_t *, const char *name);
+int zip_replace(zip_t *, zip_uint64_t index, zip_source_t *);
 
 /* ---- method-support queries ---- */
 

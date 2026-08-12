@@ -86,7 +86,7 @@ impl CentralDir {
 /// offsets match the reader's [`read_eocd64`]: entries on this disk at
 /// [24:32], total entries at [32:40], cdir size at [40:48], cdir offset at
 /// [48:56].
-fn write_eocd64(num_entries: u64, cdir_size: u64, cdir_offset: u64, out: &mut Vec<u8>) {
+pub(crate) fn write_eocd64(num_entries: u64, cdir_size: u64, cdir_offset: u64, out: &mut Vec<u8>) {
     out.extend_from_slice(&magic::EOCD64);
     out.extend_from_slice(&44u64.to_le_bytes()); // size of record excluding these 12 bytes
     out.extend_from_slice(&45u16.to_le_bytes()); // version made by
@@ -101,7 +101,7 @@ fn write_eocd64(num_entries: u64, cdir_size: u64, cdir_offset: u64, out: &mut Ve
 
 /// Serialize a ZIP64 EOCD locator (`PK\x06\x07`, 20 bytes) into `out`, pointing
 /// at the ZIP64 EOCD record at absolute offset `zip64_eocd_offset`.
-fn write_eocd64_locator(zip64_eocd_offset: u64, out: &mut Vec<u8>) {
+pub(crate) fn write_eocd64_locator(zip64_eocd_offset: u64, out: &mut Vec<u8>) {
     out.extend_from_slice(&magic::EOCD64_LOCATOR);
     out.extend_from_slice(&0u32.to_le_bytes()); // disk with the ZIP64 EOCD
     out.extend_from_slice(&zip64_eocd_offset.to_le_bytes());
@@ -112,7 +112,7 @@ fn write_eocd64_locator(zip64_eocd_offset: u64, out: &mut Vec<u8>) {
 /// (`0xFFFF` entry counts, `0xFFFFFFFF` cdir size/offset), used when a ZIP64
 /// EOCD record is present immediately before it. The archive comment lives only
 /// here (never in the ZIP64 records).
-fn write_eocd_zip64_sentinel(num_entries: u64, comment: &[u8], out: &mut Vec<u8>) {
+pub(crate) fn write_eocd_zip64_sentinel(num_entries: u64, comment: &[u8], out: &mut Vec<u8>) {
     let _ = num_entries; // sentinel 0xFFFF always represents the count here
     out.extend_from_slice(&magic::EOCD);
     out.extend_from_slice(&0u16.to_le_bytes()); // this disk

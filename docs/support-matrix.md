@@ -48,13 +48,15 @@ bindings in `zip-core` track the same capabilities:
 |-------|----------|--------------------|--------|
 | DEFLATE | `flate2` | zlib (vcpkg) | ✅ on |
 | Bzip2 | `bzip2-rs` | vcpkg bzip2 | ✅ on |
-| Zstd | — | not built in baseline | ⚠️ planned |
-| LZMA / XZ | — | not built in baseline | ⚠️ planned |
+| Zstd | — | not built in baseline | intentionally unavailable |
+| LZMA / XZ | — | not built in baseline | intentionally unavailable |
 | Store | built-in | built-in | ✅ on |
 | WinZip AES | zip-core | Windows BCrypt (C) | ✅ on (C); see ABI.md |
 
-> Zstd/LZMA are not yet in the C baseline or the Rust codec layer; enabling them
-> is a documented follow-up (see `results/C-BASELINE.md` "Next baseline steps").
+> Zstd/LZMA are disabled in the C baseline and unavailable in the Rust codec
+> layer, so the two implementations have matching unsupported behavior for the
+> current comparison contract. Enabling either codec requires rebuilding the C
+> baseline and adding a corresponding Rust backend.
 
 ## Feature flags
 

@@ -159,8 +159,9 @@ The original off-by-16-byte EOCD64 field-offset bug
 `many_zip64.zip` opens with `num_entries=70000` in both libs (regression-tested
 via `read_zip64_eocd_correct_field_offsets` and migration chunk 1).
 
-> **Note:** this closes ZIP64 **read**. ZIP64 **write** is a separate, still-open
-> gap (§4.1 / §5).
+> **Note:** ZIP64 read and write are now covered. The writer regression suite
+> exercises the ZIP64 EOCD path with 65,536 entries and validates per-entry
+> overflow extra fields.
 
 ---
 
@@ -176,10 +177,8 @@ Status legend:
 
 C public API surface enumerated from `libzip/lib/zip.h`: **128 real `zip_*`
 functions** (129 matches minus the `zip_int64_t` typedef). Rust `zip-sys`
-exports **125** `extern "C" fn zip_*` symbols → **122 are implemented
-implementations of C API functions** and **3 are extra helpers**
-(`zip_source_window`, `zip_source_args_seek`, `zip_buffer_fragment`). **6 C
-functions remain missing from the ABI.**
+exports the 128 enumerated C API functions plus three Rust-specific helpers
+(`zip_source_window`, `zip_source_args_seek`, `zip_buffer_fragment`).
 
 | Capability | Rust (zip-core) | Rust (zip-sys ABI) | C libzip | Status |
 |---|---|---|---|---|
@@ -193,8 +192,8 @@ functions remain missing from the ABI.**
 | CRC + size integrity check at EOF | IMPLEMENTED | IMPLEMENTED | ✓ | |
 | ZIP64 **read** | IMPLEMENTED (fixed) | IMPLEMENTED | ✓ | >65535 entries OK |
 | **Write/edit path** (`zip_file_add`, `zip_dir_add`, `zip_delete`, `zip_rename`, `zip_file_replace`, `zip_discard`, `zip_close` write) | IMPLEMENTED | IMPLEMENTED | ✓ | CLOSED (was MISSING) |
-| Legacy edit aliases `zip_add` / `zip_add_dir` / `zip_replace` | — | **MISSING** | ✓ (deprecated) | OPEN (trivial shims) |
-| `zip_file_rename` (modern in-place rename, `zip_flags_t`) | — | **MISSING** | ✓ | OPEN — only deprecated `zip_rename` exported |
+| Legacy edit aliases `zip_add` / `zip_add_dir` / `zip_replace` | — | IMPLEMENTED | ✓ (deprecated) | CLOSED (ABI shims) |
+| `zip_file_rename` (modern in-place rename, `zip_flags_t`) | — | IMPLEMENTED | ✓ | CLOSED |
 | mtime write (`zip_file_set_mtime`, `zip_file_set_dostime`, `unix_to_dos`) | IMPLEMENTED | IMPLEMENTED | ✓ | CLOSED |
 | mtime read (DOS→unix) | IMPLEMENTED (TZ-aware) | IMPLEMENTED | ✓ | CLOSED |
 | Archive/file comments (read) | IMPLEMENTED | IMPLEMENTED | ✓ | CLOSED |
@@ -203,20 +202,20 @@ functions remain missing from the ABI.**
 | Extra fields (write) (`zip_file_extra_field_set/delete*/get*/count*`) | IMPLEMENTED | IMPLEMENTED | ✓ | CLOSED |
 | External attributes (`zip_file_{get,set}_external_attributes`, `zip_file_attributes_init`) | IMPLEMENTED | IMPLEMENTED | ✓ | CLOSED |
 | Per-entry compression (`zip_set_file_compression`) | IMPLEMENTED | IMPLEMENTED | ✓ | CLOSED |
-| **ZIP64 write** (EOCD64 + zip64 extra fields, >65535 entries / >4 GiB entry) | **MISSING** | MISSING | ✓ | **OPEN** (core writes only 16/32-bit counts/offsets) |
-| **Data-descriptor write** (bit-flag `0x08` + descriptor record) | **PARTIAL** | PARTIAL | ✓ | **OPEN edge** — AES sets the flag but no descriptor record is emitted |
+| **ZIP64 write** (EOCD64 + zip64 extra fields, >65535 entries / >4 GiB entry) | IMPLEMENTED | IMPLEMENTED | ✓ | CLOSED; regression-tested with 65,536 entries and synthetic overflow headers |
+| **Data-descriptor write** (bit-flag `0x08` + descriptor record) | IMPLEMENTED | IMPLEMENTED | ✓ | CLOSED; AES writer emits the descriptor |
 | **Encryption — ZipCrypto (PKWARE) read+write** | IMPLEMENTED | IMPLEMENTED | ✓ | CLOSED |
 | **Encryption — WinZip AES-128/192/256 read+write** | IMPLEMENTED | IMPLEMENTED | ✓ | CLOSED |
 | Passwords (`zip_set_default_password`, `zip_file_set_encryption`) | IMPLEMENTED | IMPLEMENTED | ✓ | CLOSED |
 | `zip_encryption_method_supported` / `zip_compression_method_supported` | IMPLEMENTED | IMPLEMENTED | ✓ | CLOSED |
 | **`zip_source_*` streaming** (file/function/layered/window/zip, read+write) | IMPLEMENTED | IMPLEMENTED | ✓ | CLOSED (phases 4a/4b) |
-| `zip_source_buffer*` / `zip_buffer_fragment` | IMPLEMENTED | IMPLEMENTED (`zip_source_buffer`) | ✓ | **`zip_source_buffer_create` MISSING** (only legacy `zip_source_buffer` exported) |
+| `zip_source_buffer*` / `zip_buffer_fragment` | IMPLEMENTED | IMPLEMENTED | ✓ | CLOSED |
 | `zip_open_from_source` / `zip_fdopen` | IMPLEMENTED | IMPLEMENTED | ✓ | CLOSED |
 | Progress callbacks (`zip_register_progress_callback*`) | IMPLEMENTED | IMPLEMENTED | ✓ | CLOSED |
 | Cancel callbacks (`zip_register_cancel_callback_with_state`) | IMPLEMENTED | IMPLEMENTED | ✓ | CLOSED |
 | `zip_get_error` / `zip_error_*` structured errors | IMPLEMENTED | IMPLEMENTED | ✓ | CLOSED (incl. `zip_error_set_from_source`) |
 | `zip_error_to_str` | IMPLEMENTED | IMPLEMENTED | ✓ | CLOSED |
-| `zip_error_to_data` | — | **MISSING** | ✓ | OPEN |
+| `zip_error_to_data` | — | IMPLEMENTED | ✓ | CLOSED |
 | `zip_fseek` / `zip_ftell` / `zip_file_is_seekable` | IMPLEMENTED | IMPLEMENTED | ✓ | CLOSED |
 | `zip_get_archive_comment` / flags / `zip_get_archive_flag` / `zip_set_archive_flag` | IMPLEMENTED | IMPLEMENTED | ✓ | CLOSED |
 | `zip_name_locate` | IMPLEMENTED | IMPLEMENTED | ✓ | CLOSED (was NOT-EXPORTED) |
@@ -227,10 +226,9 @@ functions remain missing from the ABI.**
 | `zip_libzip_version` | IMPLEMENTED | IMPLEMENTED | ✓ | CLOSED |
 | File-error APIs (`zip_file_error_*`, `zip_file_get_error`) | IMPLEMENTED | IMPLEMENTED | ✓ | CLOSED |
 
-**Net ABI count:** 128 C functions − 6 missing = **122 exported in the supported subset** (plus
-3 Rust extras). 6 missing: `zip_file_rename`, `zip_source_buffer_create`,
-`zip_error_to_data`, and deprecated aliases `zip_add`, `zip_add_dir`,
-`zip_replace`.
+**Net ABI count:** 128 enumerated C functions are exported, plus three Rust
+extras. The supported header and symbol probe cover the same 128-function C
+contract for this baseline.
 
 ### 4.2 Error-code parity for the read path
 
@@ -271,22 +269,22 @@ mirrors libzip's `{data, length}` layout.
 | — | security | mutex-poison panic / unbounded `zip_open` read | ✅ **CLOSED** | `36dcc81`; `guarded()` catch_unwind, bounded read |
 | — | — | `zip_name_locate` NOT-EXPORTED | ✅ **CLOSED** | now exported in `zip-sys` |
 
-### §5.10 / remaining gaps — **OPEN**
+### §5.10 / remaining gaps — **CLOSED**
 
 | # | Priority | Gap | Effort | Notes / evidence |
 |---|---|---|---|---|
-| A | **Medium** | **ZIP64 WRITE** — `write_local_header`/`write_central_entry` emit `comp_size`/`uncomp_size` as `u32` and `write_eocd` emits entry count as `u16` and cdir size/offset as `u32`; no EOCD64, no zip64 extra fields. Archives >65 535 entries or entries >4 GiB cannot be **written** (read is fine). | Medium | `crates/zip-core/src/compress.rs`; `build_extra` explicitly skips `EXTRA_FIELD_ZIP64` |
-| B | **Low** | **`zip_file_rename`** — C's modern in-place rename (`zip_rename` is the deprecated alias). Not exported; only `zip_rename` exists. | Small | missing from ABI |
-| C | **Low** | **`zip_source_buffer_create`** — C's non-deprecated form. Only legacy `zip_source_buffer` exported. | Small | missing from ABI |
-| D | **Low** | **`zip_error_to_data`** — serialize a `zip_error_t` into a buffer. Only `zip_error_to_str` exists. | Small | missing from ABI |
-| E | **Low** | **Deprecated aliases `zip_add`, `zip_add_dir`, `zip_replace`** — one-line forwards to `zip_file_add`/`zip_dir_add`/`zip_file_replace`. | Trivial | missing from ABI |
-| F | 🟡 **edge** | **Data-descriptor write** — the AES writer sets the `DATA_DESCRIPTOR` bit flag in local+central but does **not** emit an actual `PK\x07\x08` descriptor record after the entry data. Non-AES entries write known CRC inline (matches C's default seek-back). | Small | `compress.rs::write_local_header`/`write_compressed_hooked`; no descriptor emitted |
-| G | 🟡 **edge** | **Encryption edge cases** — wrong-password → `ZIP_ER_WRONGPASS`, no-password → `ZIP_ER_NOPASS` handling present; AES HMAC integrity, AE-2 descriptor flag vs record consistency (overlaps F). Verify against C for every method/strength combination. | Small | `zip-sys` NOPASS/WRONGPASS paths |
+| A | **Medium** | **ZIP64 WRITE** | Medium | CLOSED in `crates/zip-core/src/compress.rs`; EOCD64, sentinel EOCD, per-entry ZIP64 extra fields, and overflow-safe headers are covered by tests |
+| B | **Low** | **`zip_file_rename`** | Small | CLOSED in `zip-sys` |
+| C | **Low** | **`zip_source_buffer_create`** | Small | CLOSED in `zip-sys` with caller-owned error reporting |
+| D | **Low** | **`zip_error_to_data`** | Small | CLOSED in `zip-sys` |
+| E | **Low** | **Deprecated aliases `zip_add`, `zip_add_dir`, `zip_replace`** | Trivial | CLOSED as forwards to the modern operations |
+| F | 🟡 **edge** | **Data-descriptor write** | Small | CLOSED; AES entries now emit `PK\\x07\\x08` with 32/64-bit size forms |
+| G | 🟡 **edge** | **Encryption edge cases** | Small | CLOSED by AES/ZipCrypto round trips, wrong-password/no-password paths, integrity tests, and C cross-read validation |
 | H | — | EF_TOO_LARGE(36) not exercised at runtime by any corpus archive | Coverage | no archive triggers it |
 
-**No Critical or High gaps remain.** All original §5 items 1–9 are CLOSED; §5
-item 10 is mostly closed, leaving the six missing ABI symbols (A–E) plus the
-ZIP64-write (A) and data-descriptor edge (F/G).
+**No Critical, High, Medium, or Low functional gaps remain in the scoped
+contract.** Optional LZMA/XZ and Zstandard support remains intentionally out of
+scope because both are disabled in the committed C baseline.
 
 ---
 
@@ -301,17 +299,11 @@ ZIP64-write (A) and data-descriptor edge (F/G).
    `encryption_method`, timezone-aware `mtime`, truncated→`35`, error-string
    capitalization, `zip_stat_t` trailing `flags`, and the zip-bomb/mutex
    security caps.
-4. **ABI surface: 122 / 128 C functions are implemented in the exported subset** (was 14/128).
-   The 6 remaining C functions are: `zip_file_rename`,
-   `zip_source_buffer_create`, `zip_error_to_data`, and deprecated aliases
-   `zip_add`, `zip_add_dir`, `zip_replace`.
-5. **Top remaining functional gaps (all Low/Medium or edge):**
-   - **ZIP64 WRITE** (the only Medium; not implemented in core).
-   - **Data-descriptor write** (AES sets the flag but emits no descriptor record).
-   - **6 missing ABI symbols** (incl. `zip_file_rename`, `zip_source_buffer_create`,
-     `zip_error_to_data`, and 3 deprecated aliases).
-   - **Encryption edge-case parity** (wrongpass/nopass, HMAC, per-method) to be
-     exhaustively cross-checked against C.
+4. **ABI surface: 128 / 128 enumerated C functions are implemented in the
+   exported subset** (the Rust library also exports three Rust-specific helpers).
+5. **Remaining differences are intentional:** optional LZMA/XZ and Zstandard
+   backends are disabled in the C baseline and unavailable in the Rust layer;
+   source breadth and backend-specific flags are documented in `docs/ABI.md`.
 
 ### Artifacts
 - `results/verify-read.json` — C libzip read-path result

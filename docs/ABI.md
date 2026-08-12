@@ -23,9 +23,13 @@ The current implementation covers these groups of the libzip model:
 - archive open/close/discard, entry enumeration, name lookup, stat, and errors;
 - entry reads, seeking, seekability, CRC/size validation, and encrypted reads;
 - add, replace, delete, rename, directory creation, and close-time writes;
+- modern and deprecated add/replace/rename entry points, including
+  `zip_file_rename`, `zip_add`, `zip_add_dir`, and `zip_replace`;
 - archive/file comments, extra fields, timestamps, external attributes, and
   per-entry compression settings;
 - stored, DEFLATE, and Bzip2 support as exposed by the method queries;
+- ZIP64 read/write, including ZIP64 central-directory records, per-entry
+  overflow fields, and ZIP64 end-of-central-directory records;
 - ZipCrypto and WinZip AES-128/192/256 encryption;
 - buffer, file, file-pointer, callback, window, layered, and archive-entry
   sources, including source read/write lifecycle helpers;
@@ -36,20 +40,19 @@ The Rust core also provides an idiomatic `Source` trait, deterministic optional
 parallel compression, and async entry reads through `zip-async`. Those Rust APIs
 are separate from the C ABI.
 
-## Deliberate compatibility gaps
+## Deliberate compatibility differences
 
 The following differences are known and should be checked before replacing an
 existing libzip build:
 
-- ZIP64 archives can be read, but the normal Rust writer does not yet cover the
-  full ZIP64 write range.
-- `zip_file_rename`, `zip_source_buffer_create`, and `zip_error_to_data` are not
-  currently exported.
-- Deprecated aliases `zip_add`, `zip_add_dir`, and `zip_replace` are not
-  currently exported; use the modern operations in the supported surface.
 - The Rust implementation and C libzip may differ in backend-specific details,
   codec availability, and unexposed flags. C callers must use the shipped
-  header and not assume every upstream symbol is present.
+  header and should not assume every upstream symbol is present.
+- The local C baseline has Bzip2 enabled for read/write while the Rust core
+  currently exposes Bzip2 decoding; Store and DEFLATE are the portable Rust
+  write codecs.
+- LZMA/XZ and Zstandard are disabled in the committed C baseline and are not
+  enabled in the Rust codec layer.
 
 ## Verification
 
