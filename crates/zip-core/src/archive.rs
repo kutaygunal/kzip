@@ -278,6 +278,21 @@ impl Archive {
             && !matches!(method, CompressionMethod::Unsupported(_))
             && uncomp_size <= ZERO_COPY_FAST_MAX_UNCOMP
         {
+            if method == CompressionMethod::Store {
+                if let Some(shared) = dup.shared_data() {
+                    let start = data_offset as usize;
+                    let end = start.saturating_add(comp_size as usize);
+                    if end <= shared.as_slice().len() {
+                        return Ok(EntryReader::from_shared(
+                            shared,
+                            start,
+                            comp_size as usize,
+                            crc,
+                            uncomp_size,
+                        ));
+                    }
+                }
+            }
             // Only buffer-backed sources expose `as_slice()`; for a real
             // `File` this is `None`, so we skip the tell syscall entirely.
             if let Some(slice) = dup.as_slice() {

@@ -59,7 +59,7 @@ use std::ffi::{CStr, CString};
 use std::io::Read;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicI32, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use zip_core::constant::CompressionMethod;
 use zip_core::{
@@ -509,6 +509,18 @@ impl ZipSource {
         }
         self.dispatch(ZIP_SOURCE_CLOSE, std::ptr::null_mut(), 0);
         Ok(out)
+    }
+
+    /// Move a plain in-memory source buffer into the pending archive operation.
+    /// A successfully added libzip source is consumed by `zip_file_add`, so the
+    /// move is valid and avoids a second full-buffer copy. Layered and callback
+    /// sources retain the generic drain path above.
+    fn take_memory_data(&self) -> Option<Vec<u8>> {
+        let mut backend = self.backend.lock().unwrap_or_else(|e| e.into_inner());
+        match &mut *backend {
+            SourceBackend::Memory { data, .. } => Some(std::mem::take(data)),
+            _ => None,
+        }
     }
 
     /// Dispatch a single `zip_source_cmd` to the backend, mirroring libzip's
@@ -1420,18 +1432,27 @@ pub unsafe extern "C" fn zip_open(path: *const c_char, flags: c_int, errorp: *mu
         // ZIP_TRUNCATE discards any existing content and starts fresh.
         let truncate = flags & ZIP_TRUNCATE != 0;
         let archive = if existed && !truncate {
-            let file = std::fs::File::open(path).map_err(|_| ZipErrorCode::Open.as_i32())?;
-            // Bound the whole-file read so a huge/malicious file cannot cause an
-            // unbounded allocation. Read at most MAX_OPEN_FILE_SIZE+1 bytes; if we
-            // got more than the cap, reject the archive with a clear error.
-            let mut bytes = Vec::new();
-            file.take(MAX_OPEN_FILE_SIZE + 1)
-                .read_to_end(&mut bytes)
-                .map_err(|_| ZipErrorCode::Read.as_i32())?;
-            if bytes.len() as u64 > MAX_OPEN_FILE_SIZE {
-                return Err(ZipErrorCode::Memory.as_i32());
+            if flags & ZIP_RDONLY != 0 {
+                // Read-only handles can use the core's memory-map path. This
+                // avoids copying the complete archive before entry reads and
+                // keeps the mapped owner alive through every entry reader.
+                let file = std::fs::File::open(path).map_err(|_| ZipErrorCode::Open.as_i32())?;
+                Archive::open(file).map_err(|e| e.code().as_i32())?
+            } else {
+                let file = std::fs::File::open(path).map_err(|_| ZipErrorCode::Open.as_i32())?;
+                // Bound the whole-file read so a huge/malicious file cannot cause an
+                // unbounded allocation. Read at most MAX_OPEN_FILE_SIZE+1 bytes; if we
+                // got more than the cap, reject the archive with a clear error.
+                let mut bytes = Vec::new();
+                file.take(MAX_OPEN_FILE_SIZE + 1)
+                    .read_to_end(&mut bytes)
+                    .map_err(|_| ZipErrorCode::Read.as_i32())?;
+                if bytes.len() as u64 > MAX_OPEN_FILE_SIZE {
+                    return Err(ZipErrorCode::Memory.as_i32());
+                }
+                let bytes = Arc::<[u8]>::from(bytes.into_boxed_slice());
+                Archive::open(std::io::Cursor::new(bytes)).map_err(|e| e.code().as_i32())?
             }
-            Archive::open(std::io::Cursor::new(bytes)).map_err(|e| e.code().as_i32())?
         } else {
             // New archive: start from an empty (valid) archive.
             let empty =
@@ -2202,11 +2223,11 @@ pub unsafe extern "C" fn zip_fopen(zh: H, name: *const c_char, _flags: u32) -> H
             };
             match z.archive.name_locate(name) {
                 Some(idx) => {
-                    let data = z.archive.read_entry(idx).map_err(|e| {
+                    let reader = z.archive.open_entry(idx).map_err(|e| {
                         z.set_err(e.code().as_i32(), 0);
                         -1
                     })?;
-                    Ok(make_zipfile(z, data, idx))
+                    Ok(make_zipfile_reader(reader))
                 }
                 None => {
                     z.set_err(ZipErrorCode::Noent.as_i32(), 0);
@@ -2229,11 +2250,11 @@ pub unsafe extern "C" fn zip_fopen_index(zh: H, index: u64, _flags: u32) -> H {
     guarded(
         || {
             let z = zh.cast::<Zip>().as_ref().ok_or(-1)?;
-            let data = z.archive.read_entry(index).map_err(|e| {
+            let reader = z.archive.open_entry(index).map_err(|e| {
                 z.set_err(e.code().as_i32(), 0);
                 -1
             })?;
-            Ok(make_zipfile(z, data, index))
+            Ok(make_zipfile_reader(reader))
         },
         std::ptr::null_mut(),
     )
@@ -2395,6 +2416,27 @@ unsafe fn make_zipfile(z: &Zip, data: Vec<u8>, index: u64) -> H {
             std::ptr::null_mut()
         }
     }
+}
+
+/// Build a `ZipFile` around a streaming reader. This is the fast path for
+/// ordinary `zip_fopen*` calls: Store entries can reference shared archive bytes
+/// directly, while compressed entries decode incrementally as `zip_fread` pulls
+/// data instead of eagerly materializing a second full buffer.
+unsafe fn make_zipfile_reader(reader: EntryReader) -> H {
+    let f = Box::new(ZipFile {
+        reader: Mutex::new(reader),
+        last_error: AtomicI32::new(0),
+        err_msg: Mutex::new(CString::new(err_str(0)).unwrap_or_default()),
+        error: Mutex::new(ZipErrorState {
+            ze: zip_error {
+                zip_err: 0,
+                sys_err: 0,
+                str: std::ptr::null_mut(),
+            },
+            owned: Some(CString::new(err_str(0)).unwrap_or_default()),
+        }),
+    });
+    Box::into_raw(f) as H
 }
 
 /// Open an entry by name for reading, decrypting with `password`. Returns an
@@ -4712,10 +4754,13 @@ pub unsafe extern "C" fn zip_file_add(zh: H, name: *const c_char, source: H, fla
                 }
             };
             let src = source.cast::<ZipSource>().as_ref().ok_or(-1)?;
-            let data = src.read_all().map_err(|_| {
-                z.set_err(ZipErrorCode::Read.as_i32(), 0);
-                -1
-            })?;
+            let data = match src.take_memory_data() {
+                Some(data) => data,
+                None => src.read_all().map_err(|_| {
+                    z.set_err(ZipErrorCode::Read.as_i32(), 0);
+                    -1
+                })?,
+            };
             let mut pending = z.pending.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(idx) = z.archive.name_locate(&name) {
                 if flags & ZIP_FL_OVERWRITE != 0 {
@@ -4870,10 +4915,13 @@ pub unsafe extern "C" fn zip_file_replace(zh: H, index: u64, source: H, _flags: 
                 return Err(-1);
             }
             let src = source.cast::<ZipSource>().as_ref().ok_or(-1)?;
-            let data = src.read_all().map_err(|_| {
-                z.set_err(ZipErrorCode::Read.as_i32(), 0);
-                -1
-            })?;
+            let data = match src.take_memory_data() {
+                Some(data) => data,
+                None => src.read_all().map_err(|_| {
+                    z.set_err(ZipErrorCode::Read.as_i32(), 0);
+                    -1
+                })?,
+            };
             let mut pending = z.pending.lock().unwrap_or_else(|e| e.into_inner());
             pending.replaces.push((index, data));
             Ok(0)

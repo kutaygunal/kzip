@@ -20,6 +20,7 @@ type FileHandle = c_void;
 
 const ZIP_CREATE: c_int = 1;
 const ZIP_TRUNCATE: c_int = 8;
+const ZIP_RDONLY: c_int = 16;
 const ZIP_CM_STORE: c_int = 0;
 const ZIP_CM_DEFLATE: c_int = 8;
 
@@ -391,7 +392,7 @@ fn verify_archive(
 
 fn read_archive_checked(api: &Api, path: &Path, workload: &Workload) -> Result<(u64, u64), String> {
     let path = CString::new(path.to_string_lossy().as_bytes()).map_err(|e| e.to_string())?;
-    let handle = unsafe { (api.zip_open)(path.as_ptr(), 0, std::ptr::null_mut()) };
+    let handle = unsafe { (api.zip_open)(path.as_ptr(), ZIP_RDONLY, std::ptr::null_mut()) };
     if handle.is_null() {
         return Err(format!(
             "zip_open failed for read: {}",

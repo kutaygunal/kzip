@@ -9,7 +9,7 @@ use crate::bufferpool::BufferPool;
 use crate::codec::Decoder;
 use crate::constant::CompressionMethod;
 use crate::error::Result;
-use crate::source::Source;
+use crate::source::{SharedData, Source};
 use std::io::{self, Read};
 use std::sync::{Arc, Mutex};
 
@@ -34,6 +34,13 @@ enum Inner {
         data: Vec<u8>,
         pos: usize,
         pool: Option<Arc<Mutex<BufferPool>>>,
+    },
+    /// Stored bytes served directly from an immutable archive backing store.
+    Shared {
+        data: SharedData,
+        start: usize,
+        end: usize,
+        pos: usize,
     },
 }
 
@@ -149,6 +156,33 @@ impl EntryReader {
         }
     }
 
+    /// Build a reader over a stored entry without copying its bytes. The shared
+    /// backing owner keeps the archive data alive for the FFI handle lifetime.
+    pub fn from_shared(
+        data: SharedData,
+        start: usize,
+        len: usize,
+        expected_crc: u32,
+        expected_size: u64,
+    ) -> EntryReader {
+        EntryReader {
+            inner: Inner::Shared {
+                data,
+                start,
+                end: start.saturating_add(len),
+                pos: 0,
+            },
+            crc: crc32fast::Hasher::new(),
+            expected_crc,
+            expected_size,
+            size_read: 0,
+            check_crc: true,
+            finished: false,
+            integrity_err: None,
+            seeked: false,
+        }
+    }
+
     /// Build a buffered `EntryReader` (from already-decoded in-memory bytes)
     /// that skips the end-of-stream CRC check. Used for WinZip AES AE-2
     /// entries, whose stored CRC is 0/invalid (integrity comes from the HMAC).
@@ -182,7 +216,7 @@ impl EntryReader {
 
     /// Whether this reader supports seeking (true for buffered readers).
     pub fn is_seekable(&self) -> bool {
-        matches!(self.inner, Inner::Buffered { .. })
+        matches!(self.inner, Inner::Buffered { .. } | Inner::Shared { .. })
     }
 
     /// Seek to an absolute position within the decompressed entry data.
@@ -194,6 +228,17 @@ impl EntryReader {
         match &mut self.inner {
             Inner::Buffered { data, pos: p, .. } => {
                 *p = (pos as usize).min(data.len());
+                self.size_read = *p as u64;
+                self.crc = crc32fast::Hasher::new();
+                self.finished = false;
+                self.integrity_err = None;
+                self.seeked = true;
+                Ok(())
+            }
+            Inner::Shared {
+                start, end, pos: p, ..
+            } => {
+                *p = (pos as usize).min(end.saturating_sub(*start));
                 self.size_read = *p as u64;
                 self.crc = crc32fast::Hasher::new();
                 self.finished = false;
@@ -241,6 +286,24 @@ impl Read for EntryReader {
                 if *pos < data.len() {
                     let take = (data.len() - *pos).min(buf.len());
                     buf[..take].copy_from_slice(&data[*pos..*pos + take]);
+                    *pos += take;
+                    take
+                } else {
+                    0
+                }
+            }
+            Inner::Shared {
+                data,
+                start,
+                end,
+                pos,
+            } => {
+                let bytes = data.as_slice();
+                let begin = start.saturating_add(*pos).min(bytes.len());
+                let limit = (*end).min(bytes.len());
+                if begin < limit {
+                    let take = (limit - begin).min(buf.len());
+                    buf[..take].copy_from_slice(&bytes[begin..begin + take]);
                     *pos += take;
                     take
                 } else {

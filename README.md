@@ -121,37 +121,50 @@ not a universal performance claim.
 ### What the snapshot says
 
 - Rust won 9 of 10 write rows in this run; mixed DEFLATE was the exception.
-- Read performance is mixed. The many-small Store case is a clear Rust
-  regression target: roughly 7 MiB/s for Rust versus 366 MiB/s for C in this
-  snapshot, likely dominated by per-entry C-ABI/read-path overhead.
+- Rust also won all 10 read rows after the read-path optimization. The
+  many-small Store case improved from roughly 7 MiB/s to 805 MiB/s, versus
+  385 MiB/s for C.
 - The benchmark validates content checksums while timing, so a fast incorrect
   archive cannot score as a win.
+
+### Bottleneck analysis and fixes
+
+The original Rust read path eagerly decoded each entry into a new `Vec`, then
+copied it again through `zip_fread`. That was especially expensive for 1,024
+small Store entries. Read-only opens now use mmap, Store readers reference
+shared immutable archive bytes directly, and DEFLATE entries stream through the
+decoder (using the pooled fast path or streaming fallback) instead of calling
+`read_entry` and then copying through the FFI handle. The write path also avoids
+a second copy when `zip_file_add` consumes a plain buffer source and
+preallocates bounded DEFLATE output capacity. The optimized snapshot beats C in 19 of 20
+rows; the only remaining miss is mixed DEFLATE write, where this run measured
+85.2 MiB/s Rust versus 86.8 MiB/s C.
 
 <details>
 <summary>Exact median throughput from the captured run</summary>
 
 | Operation | Method | Workload | libzip C | kzip Rust | Faster |
 | --- | --- | --- | ---: | ---: | --- |
-| write | Store | tiny-mixed | 16.5 | 20.1 | Rust |
-| read | Store | tiny-mixed | 383.3 | 283.9 | C |
-| write | DEFLATE | tiny-mixed | 18.4 | 38.9 | Rust |
-| read | DEFLATE | tiny-mixed | 310.9 | 375.4 | Rust |
-| write | Store | many-small | 113.6 | 234.5 | Rust |
-| read | Store | many-small | 365.9 | 6.8 | C |
-| write | DEFLATE | many-small | 85.9 | 156.2 | Rust |
-| read | DEFLATE | many-small | 297.2 | 314.4 | Rust |
-| write | Store | text-8m | 392.3 | 551.2 | Rust |
-| read | Store | text-8m | 641.7 | 291.8 | C |
-| write | DEFLATE | text-8m | 186.1 | 407.6 | Rust |
-| read | DEFLATE | text-8m | 574.8 | 583.6 | Rust |
-| write | Store | mixed-8m | 400.4 | 549.6 | Rust |
-| read | Store | mixed-8m | 652.7 | 300.8 | C |
-| write | DEFLATE | mixed-8m | 88.2 | 82.5 | C |
-| read | DEFLATE | mixed-8m | 580.3 | 380.1 | C |
-| write | Store | single-16m | 502.0 | 653.7 | Rust |
-| read | Store | single-16m | 631.4 | 403.9 | C |
-| write | DEFLATE | single-16m | 206.7 | 502.7 | Rust |
-| read | DEFLATE | single-16m | 630.0 | 577.5 | C |
+| write | Store | tiny-mixed | 16.7 | 19.9 | Rust |
+| read | Store | tiny-mixed | 386.5 | 606.4 | Rust |
+| write | DEFLATE | tiny-mixed | 27.2 | 42.3 | Rust |
+| read | DEFLATE | tiny-mixed | 312.5 | 427.5 | Rust |
+| write | Store | many-small | 106.4 | 255.9 | Rust |
+| read | Store | many-small | 385.4 | 804.9 | Rust |
+| write | DEFLATE | many-small | 101.5 | 176.9 | Rust |
+| read | DEFLATE | many-small | 333.4 | 509.6 | Rust |
+| write | Store | text-8m | 410.2 | 713.3 | Rust |
+| read | Store | text-8m | 681.4 | 879.3 | Rust |
+| write | DEFLATE | text-8m | 214.9 | 546.3 | Rust |
+| read | DEFLATE | text-8m | 641.1 | 974.1 | Rust |
+| write | Store | mixed-8m | 382.2 | 691.1 | Rust |
+| read | Store | mixed-8m | 624.0 | 831.1 | Rust |
+| write | DEFLATE | mixed-8m | 86.8 | 85.2 | C |
+| read | DEFLATE | mixed-8m | 535.4 | 894.9 | Rust |
+| write | Store | single-16m | 507.9 | 826.3 | Rust |
+| read | Store | single-16m | 628.6 | 756.5 | Rust |
+| write | DEFLATE | single-16m | 195.6 | 502.0 | Rust |
+| read | DEFLATE | single-16m | 636.0 | 910.6 | Rust |
 
 Throughput is MiB/s; the underlying JSON also preserves p95 latency and all
 individual samples.

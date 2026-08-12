@@ -140,7 +140,13 @@ pub fn compress_bytes(data: &[u8], method: CompressionMethod, level: u32) -> Res
         CompressionMethod::Store => Ok(data.to_vec()),
         CompressionMethod::Deflate => {
             let lvl = flate2::Compression::new(level.min(9));
-            let mut enc = flate2::write::DeflateEncoder::new(Vec::new(), lvl);
+            // Random or already-compressed input can produce output close to
+            // the input size. A bounded initial buffer avoids repeated Vec
+            // growth/copy cycles without reserving the full input for highly
+            // compressible text.
+            let initial_capacity = data.len().min(256 * 1024);
+            let mut enc =
+                flate2::write::DeflateEncoder::new(Vec::with_capacity(initial_capacity), lvl);
             enc.write_all(data)
                 .map_err(|e| ZipError::with_system(ZipErrorCode::Write, e))?;
             enc.finish()

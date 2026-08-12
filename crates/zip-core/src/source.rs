@@ -12,6 +12,26 @@ use crate::error::{Result, ZipError, ZipErrorCode};
 use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::{Arc, Mutex};
 
+/// An immutable, reference-counted archive backing store that can be shared by
+/// entry readers without copying the archive or the stored entry.
+#[derive(Debug, Clone)]
+pub enum SharedData {
+    /// An in-memory archive buffer.
+    Bytes(Arc<[u8]>),
+    /// A read-only memory-mapped archive file.
+    Mmap(Arc<memmap2::Mmap>),
+}
+
+impl SharedData {
+    /// View the backing store as bytes.
+    pub fn as_slice(&self) -> &[u8] {
+        match self {
+            SharedData::Bytes(bytes) => bytes,
+            SharedData::Mmap(map) => map,
+        }
+    }
+}
+
 /// Metadata about a source/entry, mirroring libzip's `zip_stat_t`.
 /// Field names are self-explanatory; missing-docs allowed to reduce noise.
 #[allow(missing_docs)]
@@ -93,6 +113,12 @@ pub trait Source: Read + Seek + Send + Sync {
     /// of its **entire** backing data. The zero-copy read path uses this to
     /// avoid copying the buffer before decoding. Default: `None`.
     fn as_slice(&self) -> Option<&[u8]> {
+        None
+    }
+
+    /// Return an owned reference to immutable backing bytes when the source can
+    /// safely share them with an entry reader.
+    fn shared_data(&self) -> Option<SharedData> {
         None
     }
 
@@ -383,6 +409,10 @@ impl Source for MmapSource {
         Some(&self.map[..])
     }
 
+    fn shared_data(&self) -> Option<SharedData> {
+        Some(SharedData::Mmap(self.map.clone()))
+    }
+
     fn duplicate(&self) -> Result<Box<dyn Source>> {
         // Share the same mapping; no OS handle clone. Positioned at the start.
         Ok(Box::new(MmapSource {
@@ -407,6 +437,24 @@ impl Source for std::io::Cursor<Vec<u8>> {
 
     fn as_slice(&self) -> Option<&[u8]> {
         Some(self.get_ref().as_slice())
+    }
+
+    fn duplicate(&self) -> Result<Box<dyn Source>> {
+        Ok(Box::new(std::io::Cursor::new(self.get_ref().clone())))
+    }
+}
+
+impl Source for std::io::Cursor<Arc<[u8]>> {
+    fn supports(&self) -> Supports {
+        Supports::ReadableAndSeekable
+    }
+
+    fn as_slice(&self) -> Option<&[u8]> {
+        Some(self.get_ref())
+    }
+
+    fn shared_data(&self) -> Option<SharedData> {
+        Some(SharedData::Bytes(self.get_ref().clone()))
     }
 
     fn duplicate(&self) -> Result<Box<dyn Source>> {
