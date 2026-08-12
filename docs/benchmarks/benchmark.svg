@@ -1,0 +1,123 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="706" viewBox="0 0 1240 706" role="img" aria-label="Static benchmark chart">
+<title>kzip Rust vs libzip C — median throughput</title>
+<style>text{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;fill:#dbeafe} .muted{fill:#94a3b8;font-size:12px} .label{font-size:12px} .value{font-size:11px} .grid{stroke:#334155;stroke-width:1} .bar-c{fill:#f59e0b} .bar-r{fill:#38bdf8} 
+@keyframes grow{from{transform:scaleX(0)}to{transform:scaleX(1)}} .animated{transform-box:fill-box;transform-origin:left center;animation:grow .9s cubic-bezier(.2,.8,.2,1) both} @media(prefers-reduced-motion:reduce){.animated{animation:none!important}}</style>
+<rect width="100%" height="100%" fill="#0f172a"/>
+<text x="32" y="32" font-size="20" font-weight="600">kzip Rust vs libzip C — median throughput</text>
+<text x="32" y="54" class="muted">MiB/s • median of 7 samples after 2 warmup(s) • generated 1786574612</text>
+<rect x="32" y="68" width="12" height="12" rx="2" class="bar-c"/><text x="50" y="78" class="muted">original libzip C</text>
+<rect x="190" y="68" width="12" height="12" rx="2" class="bar-r"/><text x="208" y="78" class="muted">kzip Rust C ABI</text>
+<line x1="250.0" y1="88" x2="250.0" y2="672" class="grid"/>
+<text x="250.0" y="82" text-anchor="middle" class="muted">0</text>
+<line x1="394.0" y1="88" x2="394.0" y2="672" class="grid"/>
+<text x="394.0" y="82" text-anchor="middle" class="muted">146</text>
+<line x1="538.0" y1="88" x2="538.0" y2="672" class="grid"/>
+<text x="538.0" y="82" text-anchor="middle" class="muted">293</text>
+<line x1="682.0" y1="88" x2="682.0" y2="672" class="grid"/>
+<text x="682.0" y="82" text-anchor="middle" class="muted">439</text>
+<line x1="826.0" y1="88" x2="826.0" y2="672" class="grid"/>
+<text x="826.0" y="82" text-anchor="middle" class="muted">586</text>
+<line x1="970.0" y1="88" x2="970.0" y2="672" class="grid"/>
+<text x="970.0" y="82" text-anchor="middle" class="muted">732</text>
+<text x="32" y="112" class="label">write / store / many-small</text>
+<rect x="250" y="100" width="111.75" height="7" rx="2" class="bar-c" data-target-width="111.75" style="animation-delay:0.000s"/>
+<text x="368.8" y="107" class="value">113.6</text>
+<rect x="250" y="110" width="230.64" height="7" rx="2" class="bar-r" data-target-width="230.64" style="animation-delay:0.000s"/>
+<text x="487.6" y="117" class="value">234.5</text>
+<text x="32" y="140" class="label">write / store / mixed-8m</text>
+<rect x="250" y="128" width="393.75" height="7" rx="2" class="bar-c" data-target-width="393.75" style="animation-delay:0.000s"/>
+<text x="650.8" y="135" class="value">400.4</text>
+<rect x="250" y="138" width="540.49" height="7" rx="2" class="bar-r" data-target-width="540.49" style="animation-delay:0.000s"/>
+<text x="797.5" y="145" class="value">549.6</text>
+<text x="32" y="168" class="label">write / store / single-16m</text>
+<rect x="250" y="156" width="493.67" height="7" rx="2" class="bar-c" data-target-width="493.67" style="animation-delay:0.000s"/>
+<text x="750.7" y="163" class="value">502.0</text>
+<rect x="250" y="166" width="642.86" height="7" rx="2" class="bar-r" data-target-width="642.86" style="animation-delay:0.000s"/>
+<text x="899.9" y="173" class="value">653.7</text>
+<text x="32" y="196" class="label">write / store / text-8m</text>
+<rect x="250" y="184" width="385.74" height="7" rx="2" class="bar-c" data-target-width="385.74" style="animation-delay:0.000s"/>
+<text x="642.7" y="191" class="value">392.3</text>
+<rect x="250" y="194" width="542.01" height="7" rx="2" class="bar-r" data-target-width="542.01" style="animation-delay:0.000s"/>
+<text x="799.0" y="201" class="value">551.2</text>
+<text x="32" y="224" class="label">write / store / tiny-mixed</text>
+<rect x="250" y="212" width="16.25" height="7" rx="2" class="bar-c" data-target-width="16.25" style="animation-delay:0.000s"/>
+<text x="273.3" y="219" class="value">16.5</text>
+<rect x="250" y="222" width="19.81" height="7" rx="2" class="bar-r" data-target-width="19.81" style="animation-delay:0.000s"/>
+<text x="276.8" y="229" class="value">20.1</text>
+<text x="32" y="252" class="label">write / deflate / many-small</text>
+<rect x="250" y="240" width="84.46" height="7" rx="2" class="bar-c" data-target-width="84.46" style="animation-delay:0.000s"/>
+<text x="341.5" y="247" class="value">85.9</text>
+<rect x="250" y="250" width="153.65" height="7" rx="2" class="bar-r" data-target-width="153.65" style="animation-delay:0.000s"/>
+<text x="410.6" y="257" class="value">156.2</text>
+<text x="32" y="280" class="label">write / deflate / mixed-8m</text>
+<rect x="250" y="268" width="86.71" height="7" rx="2" class="bar-c" data-target-width="86.71" style="animation-delay:0.000s"/>
+<text x="343.7" y="275" class="value">88.2</text>
+<rect x="250" y="278" width="81.11" height="7" rx="2" class="bar-r" data-target-width="81.11" style="animation-delay:0.000s"/>
+<text x="338.1" y="285" class="value">82.5</text>
+<text x="32" y="308" class="label">write / deflate / single-16m</text>
+<rect x="250" y="296" width="203.29" height="7" rx="2" class="bar-c" data-target-width="203.29" style="animation-delay:0.000s"/>
+<text x="460.3" y="303" class="value">206.7</text>
+<rect x="250" y="306" width="494.33" height="7" rx="2" class="bar-r" data-target-width="494.33" style="animation-delay:0.000s"/>
+<text x="751.3" y="313" class="value">502.7</text>
+<text x="32" y="336" class="label">write / deflate / text-8m</text>
+<rect x="250" y="324" width="182.96" height="7" rx="2" class="bar-c" data-target-width="182.96" style="animation-delay:0.000s"/>
+<text x="440.0" y="331" class="value">186.1</text>
+<rect x="250" y="334" width="400.83" height="7" rx="2" class="bar-r" data-target-width="400.83" style="animation-delay:0.000s"/>
+<text x="657.8" y="341" class="value">407.6</text>
+<text x="32" y="364" class="label">write / deflate / tiny-mixed</text>
+<rect x="250" y="352" width="18.09" height="7" rx="2" class="bar-c" data-target-width="18.09" style="animation-delay:0.000s"/>
+<text x="275.1" y="359" class="value">18.4</text>
+<rect x="250" y="362" width="38.21" height="7" rx="2" class="bar-r" data-target-width="38.21" style="animation-delay:0.000s"/>
+<text x="295.2" y="369" class="value">38.9</text>
+<text x="32" y="392" class="label">read / store / many-small</text>
+<rect x="250" y="380" width="359.80" height="7" rx="2" class="bar-c" data-target-width="359.80" style="animation-delay:0.000s"/>
+<text x="616.8" y="387" class="value">365.9</text>
+<rect x="250" y="390" width="6.69" height="7" rx="2" class="bar-r" data-target-width="6.69" style="animation-delay:0.000s"/>
+<text x="263.7" y="397" class="value">6.8</text>
+<text x="32" y="420" class="label">read / store / mixed-8m</text>
+<rect x="250" y="408" width="641.83" height="7" rx="2" class="bar-c" data-target-width="641.83" style="animation-delay:0.000s"/>
+<text x="898.8" y="415" class="value">652.7</text>
+<rect x="250" y="418" width="295.81" height="7" rx="2" class="bar-r" data-target-width="295.81" style="animation-delay:0.000s"/>
+<text x="552.8" y="425" class="value">300.8</text>
+<text x="32" y="448" class="label">read / store / single-16m</text>
+<rect x="250" y="436" width="620.88" height="7" rx="2" class="bar-c" data-target-width="620.88" style="animation-delay:0.000s"/>
+<text x="877.9" y="443" class="value">631.4</text>
+<rect x="250" y="446" width="397.14" height="7" rx="2" class="bar-r" data-target-width="397.14" style="animation-delay:0.000s"/>
+<text x="654.1" y="453" class="value">403.9</text>
+<text x="32" y="476" class="label">read / store / text-8m</text>
+<rect x="250" y="464" width="631.03" height="7" rx="2" class="bar-c" data-target-width="631.03" style="animation-delay:0.000s"/>
+<text x="888.0" y="471" class="value">641.7</text>
+<rect x="250" y="474" width="286.93" height="7" rx="2" class="bar-r" data-target-width="286.93" style="animation-delay:0.000s"/>
+<text x="543.9" y="481" class="value">291.8</text>
+<text x="32" y="504" class="label">read / store / tiny-mixed</text>
+<rect x="250" y="492" width="376.95" height="7" rx="2" class="bar-c" data-target-width="376.95" style="animation-delay:0.000s"/>
+<text x="633.9" y="499" class="value">383.3</text>
+<rect x="250" y="502" width="279.18" height="7" rx="2" class="bar-r" data-target-width="279.18" style="animation-delay:0.000s"/>
+<text x="536.2" y="509" class="value">283.9</text>
+<text x="32" y="532" class="label">read / deflate / many-small</text>
+<rect x="250" y="520" width="292.21" height="7" rx="2" class="bar-c" data-target-width="292.21" style="animation-delay:0.000s"/>
+<text x="549.2" y="527" class="value">297.2</text>
+<rect x="250" y="530" width="309.17" height="7" rx="2" class="bar-r" data-target-width="309.17" style="animation-delay:0.000s"/>
+<text x="566.2" y="537" class="value">314.4</text>
+<text x="32" y="560" class="label">read / deflate / mixed-8m</text>
+<rect x="250" y="548" width="570.70" height="7" rx="2" class="bar-c" data-target-width="570.70" style="animation-delay:0.000s"/>
+<text x="827.7" y="555" class="value">580.3</text>
+<rect x="250" y="558" width="373.81" height="7" rx="2" class="bar-r" data-target-width="373.81" style="animation-delay:0.000s"/>
+<text x="630.8" y="565" class="value">380.1</text>
+<text x="32" y="588" class="label">read / deflate / single-16m</text>
+<rect x="250" y="576" width="619.49" height="7" rx="2" class="bar-c" data-target-width="619.49" style="animation-delay:0.000s"/>
+<text x="876.5" y="583" class="value">630.0</text>
+<rect x="250" y="586" width="567.88" height="7" rx="2" class="bar-r" data-target-width="567.88" style="animation-delay:0.000s"/>
+<text x="824.9" y="593" class="value">577.5</text>
+<text x="32" y="616" class="label">read / deflate / text-8m</text>
+<rect x="250" y="604" width="565.25" height="7" rx="2" class="bar-c" data-target-width="565.25" style="animation-delay:0.000s"/>
+<text x="822.2" y="611" class="value">574.8</text>
+<rect x="250" y="614" width="573.90" height="7" rx="2" class="bar-r" data-target-width="573.90" style="animation-delay:0.000s"/>
+<text x="830.9" y="621" class="value">583.6</text>
+<text x="32" y="644" class="label">read / deflate / tiny-mixed</text>
+<rect x="250" y="632" width="305.70" height="7" rx="2" class="bar-c" data-target-width="305.70" style="animation-delay:0.000s"/>
+<text x="562.7" y="639" class="value">310.9</text>
+<rect x="250" y="642" width="369.19" height="7" rx="2" class="bar-r" data-target-width="369.19" style="animation-delay:0.000s"/>
+<text x="626.2" y="649" class="value">375.4</text>
+<text x="32" y="694" class="muted">Higher is better. See benchmark JSON for p95, samples, workload sizes, and checksums.</text>
+</svg>

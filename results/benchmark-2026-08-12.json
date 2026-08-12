@@ -1,0 +1,881 @@
+{
+  "generated_at": "1786574612",
+  "host": {
+    "os": "windows",
+    "arch": "x86_64",
+    "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)"
+  },
+  "c_library": "1.11.4",
+  "rust_library": "1.11.4",
+  "samples": 7,
+  "warmups": 2,
+  "workloads": [
+    {
+      "name": "tiny-mixed",
+      "files": 64,
+      "bytes": 262144
+    },
+    {
+      "name": "many-small",
+      "files": 1024,
+      "bytes": 4194304
+    },
+    {
+      "name": "text-8m",
+      "files": 8,
+      "bytes": 8388608
+    },
+    {
+      "name": "mixed-8m",
+      "files": 8,
+      "bytes": 8388608
+    },
+    {
+      "name": "single-16m",
+      "files": 1,
+      "bytes": 16777216
+    }
+  ],
+  "results": [
+    {
+      "engine": "libzip-c",
+      "operation": "write",
+      "workload": "tiny-mixed",
+      "method": "store",
+      "files": 64,
+      "bytes": 262144,
+      "samples_ns": [
+        16555000,
+        14568800,
+        15006400,
+        14947700,
+        15124600,
+        15128700,
+        15281300
+      ],
+      "median_ns": 15124600,
+      "p95_ns": 16555000,
+      "throughput_mib_s": 16.529362760006876,
+      "checksum": 11390917267159186921
+    },
+    {
+      "engine": "libzip-c",
+      "operation": "read",
+      "workload": "tiny-mixed",
+      "method": "store",
+      "files": 64,
+      "bytes": 262144,
+      "samples_ns": [
+        652200,
+        653000,
+        644800,
+        653500,
+        653600,
+        651800,
+        647600
+      ],
+      "median_ns": 652200,
+      "p95_ns": 653600,
+      "throughput_mib_s": 383.3180006133088,
+      "checksum": 11390917267159186921
+    },
+    {
+      "engine": "kzip-rust",
+      "operation": "write",
+      "workload": "tiny-mixed",
+      "method": "store",
+      "files": 64,
+      "bytes": 262144,
+      "samples_ns": [
+        928600,
+        12485700,
+        11663300,
+        12828400,
+        13881000,
+        10746600,
+        12407000
+      ],
+      "median_ns": 12407000,
+      "p95_ns": 13881000,
+      "throughput_mib_s": 20.149915370355444,
+      "checksum": 11390917267159186921
+    },
+    {
+      "engine": "kzip-rust",
+      "operation": "read",
+      "workload": "tiny-mixed",
+      "method": "store",
+      "files": 64,
+      "bytes": 262144,
+      "samples_ns": [
+        880600,
+        888400,
+        945400,
+        842100,
+        835100,
+        854800,
+        972500
+      ],
+      "median_ns": 880600,
+      "p95_ns": 972500,
+      "throughput_mib_s": 283.89734272087213,
+      "checksum": 11390917267159186921
+    },
+    {
+      "engine": "libzip-c",
+      "operation": "write",
+      "workload": "tiny-mixed",
+      "method": "deflate",
+      "files": 64,
+      "bytes": 262144,
+      "samples_ns": [
+        13589300,
+        13894200,
+        12034200,
+        14004000,
+        11851600,
+        14832800,
+        9555400
+      ],
+      "median_ns": 13589300,
+      "p95_ns": 14832800,
+      "throughput_mib_s": 18.39682691529365,
+      "checksum": 11390917267159186921
+    },
+    {
+      "engine": "libzip-c",
+      "operation": "read",
+      "workload": "tiny-mixed",
+      "method": "deflate",
+      "files": 64,
+      "bytes": 262144,
+      "samples_ns": [
+        835700,
+        804000,
+        804200,
+        800100,
+        808400,
+        798600,
+        809700
+      ],
+      "median_ns": 804200,
+      "p95_ns": 835700,
+      "throughput_mib_s": 310.86794329768713,
+      "checksum": 11390917267159186921
+    },
+    {
+      "engine": "kzip-rust",
+      "operation": "write",
+      "workload": "tiny-mixed",
+      "method": "deflate",
+      "files": 64,
+      "bytes": 262144,
+      "samples_ns": [
+        6964100,
+        6434200,
+        6026400,
+        6133200,
+        7388000,
+        5576000,
+        7890100
+      ],
+      "median_ns": 6434200,
+      "p95_ns": 7890100,
+      "throughput_mib_s": 38.8548692922197,
+      "checksum": 11390917267159186921
+    },
+    {
+      "engine": "kzip-rust",
+      "operation": "read",
+      "workload": "tiny-mixed",
+      "method": "deflate",
+      "files": 64,
+      "bytes": 262144,
+      "samples_ns": [
+        698200,
+        665900,
+        651200,
+        648600,
+        661400,
+        793200,
+        704900
+      ],
+      "median_ns": 665900,
+      "p95_ns": 793200,
+      "throughput_mib_s": 375.43174650848476,
+      "checksum": 11390917267159186921
+    },
+    {
+      "engine": "libzip-c",
+      "operation": "write",
+      "workload": "many-small",
+      "method": "store",
+      "files": 1024,
+      "bytes": 4194304,
+      "samples_ns": [
+        36187500,
+        35707300,
+        34149500,
+        35197800,
+        34328000,
+        34909300,
+        35385700
+      ],
+      "median_ns": 35197800,
+      "p95_ns": 36187500,
+      "throughput_mib_s": 113.6434663530107,
+      "checksum": 18412341503154838661
+    },
+    {
+      "engine": "libzip-c",
+      "operation": "read",
+      "workload": "many-small",
+      "method": "store",
+      "files": 1024,
+      "bytes": 4194304,
+      "samples_ns": [
+        10330100,
+        10434500,
+        11602300,
+        11290500,
+        10932400,
+        11281400,
+        10670200
+      ],
+      "median_ns": 10932400,
+      "p95_ns": 11602300,
+      "throughput_mib_s": 365.88489261278403,
+      "checksum": 18412341503154838661
+    },
+    {
+      "engine": "kzip-rust",
+      "operation": "write",
+      "workload": "many-small",
+      "method": "store",
+      "files": 1024,
+      "bytes": 4194304,
+      "samples_ns": [
+        17055100,
+        16488800,
+        18155200,
+        16583500,
+        17759200,
+        16346900,
+        19886500
+      ],
+      "median_ns": 17055100,
+      "p95_ns": 19886500,
+      "throughput_mib_s": 234.53395172118604,
+      "checksum": 18412341503154838661
+    },
+    {
+      "engine": "kzip-rust",
+      "operation": "read",
+      "workload": "many-small",
+      "method": "store",
+      "files": 1024,
+      "bytes": 4194304,
+      "samples_ns": [
+        580653700,
+        585816800,
+        583627200,
+        587891600,
+        616704000,
+        621311800,
+        605717100
+      ],
+      "median_ns": 587891600,
+      "p95_ns": 621311800,
+      "throughput_mib_s": 6.803975426762349,
+      "checksum": 18412341503154838661
+    },
+    {
+      "engine": "libzip-c",
+      "operation": "write",
+      "workload": "many-small",
+      "method": "deflate",
+      "files": 1024,
+      "bytes": 4194304,
+      "samples_ns": [
+        48725200,
+        45340900,
+        47320100,
+        46570400,
+        44884900,
+        47502900,
+        42047700
+      ],
+      "median_ns": 46570400,
+      "p95_ns": 48725200,
+      "throughput_mib_s": 85.89146754161442,
+      "checksum": 18412341503154838661
+    },
+    {
+      "engine": "libzip-c",
+      "operation": "read",
+      "workload": "many-small",
+      "method": "deflate",
+      "files": 1024,
+      "bytes": 4194304,
+      "samples_ns": [
+        14569100,
+        13461100,
+        12313200,
+        13183500,
+        11930700,
+        14073500,
+        14660200
+      ],
+      "median_ns": 13461100,
+      "p95_ns": 14660200,
+      "throughput_mib_s": 297.1525358254526,
+      "checksum": 18412341503154838661
+    },
+    {
+      "engine": "kzip-rust",
+      "operation": "write",
+      "workload": "many-small",
+      "method": "deflate",
+      "files": 1024,
+      "bytes": 4194304,
+      "samples_ns": [
+        24248400,
+        29283200,
+        25600800,
+        27968400,
+        27195500,
+        22868900,
+        25518400
+      ],
+      "median_ns": 25600800,
+      "p95_ns": 29283200,
+      "throughput_mib_s": 156.2451173400831,
+      "checksum": 18412341503154838661
+    },
+    {
+      "engine": "kzip-rust",
+      "operation": "read",
+      "workload": "many-small",
+      "method": "deflate",
+      "files": 1024,
+      "bytes": 4194304,
+      "samples_ns": [
+        11884800,
+        13614800,
+        15308800,
+        13467000,
+        12722900,
+        12149500,
+        11821900
+      ],
+      "median_ns": 12722900,
+      "p95_ns": 15308800,
+      "throughput_mib_s": 314.39373098900404,
+      "checksum": 18412341503154838661
+    },
+    {
+      "engine": "libzip-c",
+      "operation": "write",
+      "workload": "text-8m",
+      "method": "store",
+      "files": 8,
+      "bytes": 8388608,
+      "samples_ns": [
+        19685200,
+        20991800,
+        21690700,
+        20114400,
+        18978200,
+        22080200,
+        20394700
+      ],
+      "median_ns": 20394700,
+      "p95_ns": 22080200,
+      "throughput_mib_s": 392.25877311262235,
+      "checksum": 6528374516290997441
+    },
+    {
+      "engine": "libzip-c",
+      "operation": "read",
+      "workload": "text-8m",
+      "method": "store",
+      "files": 8,
+      "bytes": 8388608,
+      "samples_ns": [
+        12310900,
+        12478500,
+        12279800,
+        12669300,
+        12466900,
+        12965800,
+        12348900
+      ],
+      "median_ns": 12466900,
+      "p95_ns": 12965800,
+      "throughput_mib_s": 641.6992195333243,
+      "checksum": 6528374516290997441
+    },
+    {
+      "engine": "kzip-rust",
+      "operation": "write",
+      "workload": "text-8m",
+      "method": "store",
+      "files": 8,
+      "bytes": 8388608,
+      "samples_ns": [
+        15303100,
+        13035100,
+        14901300,
+        13719700,
+        13629600,
+        15791900,
+        14514500
+      ],
+      "median_ns": 14514500,
+      "p95_ns": 15791900,
+      "throughput_mib_s": 551.1729649660684,
+      "checksum": 6528374516290997441
+    },
+    {
+      "engine": "kzip-rust",
+      "operation": "read",
+      "workload": "text-8m",
+      "method": "store",
+      "files": 8,
+      "bytes": 8388608,
+      "samples_ns": [
+        27417600,
+        27134500,
+        27573300,
+        26902700,
+        27495900,
+        26618600,
+        29188700
+      ],
+      "median_ns": 27417600,
+      "p95_ns": 29188700,
+      "throughput_mib_s": 291.7833800186741,
+      "checksum": 6528374516290997441
+    },
+    {
+      "engine": "libzip-c",
+      "operation": "write",
+      "workload": "text-8m",
+      "method": "deflate",
+      "files": 8,
+      "bytes": 8388608,
+      "samples_ns": [
+        45024600,
+        42997700,
+        45407500,
+        43191800,
+        36807100,
+        38582700,
+        39296300
+      ],
+      "median_ns": 42997700,
+      "p95_ns": 45407500,
+      "throughput_mib_s": 186.0564634852562,
+      "checksum": 6528374516290997441
+    },
+    {
+      "engine": "libzip-c",
+      "operation": "read",
+      "workload": "text-8m",
+      "method": "deflate",
+      "files": 8,
+      "bytes": 8388608,
+      "samples_ns": [
+        14317000,
+        14151100,
+        13167000,
+        13917900,
+        13262800,
+        13490700,
+        13994700
+      ],
+      "median_ns": 13917900,
+      "p95_ns": 14317000,
+      "throughput_mib_s": 574.7993590987146,
+      "checksum": 6528374516290997441
+    },
+    {
+      "engine": "kzip-rust",
+      "operation": "write",
+      "workload": "text-8m",
+      "method": "deflate",
+      "files": 8,
+      "bytes": 8388608,
+      "samples_ns": [
+        19827100,
+        22949400,
+        16681700,
+        16434400,
+        17272700,
+        19626900,
+        19629500
+      ],
+      "median_ns": 19626900,
+      "p95_ns": 22949400,
+      "throughput_mib_s": 407.60384981836154,
+      "checksum": 6528374516290997441
+    },
+    {
+      "engine": "kzip-rust",
+      "operation": "read",
+      "workload": "text-8m",
+      "method": "deflate",
+      "files": 8,
+      "bytes": 8388608,
+      "samples_ns": [
+        14961500,
+        14540000,
+        13631300,
+        13172700,
+        14493000,
+        13708000,
+        13234500
+      ],
+      "median_ns": 13708000,
+      "p95_ns": 14961500,
+      "throughput_mib_s": 583.6008170411438,
+      "checksum": 6528374516290997441
+    },
+    {
+      "engine": "libzip-c",
+      "operation": "write",
+      "workload": "mixed-8m",
+      "method": "store",
+      "files": 8,
+      "bytes": 8388608,
+      "samples_ns": [
+        22024200,
+        20488100,
+        19979700,
+        20190500,
+        19210400,
+        18985700,
+        19539400
+      ],
+      "median_ns": 19979700,
+      "p95_ns": 22024200,
+      "throughput_mib_s": 400.40641250869635,
+      "checksum": 11974563265124071073
+    },
+    {
+      "engine": "libzip-c",
+      "operation": "read",
+      "workload": "mixed-8m",
+      "method": "store",
+      "files": 8,
+      "bytes": 8388608,
+      "samples_ns": [
+        12549100,
+        12689300,
+        11814900,
+        12257100,
+        11867500,
+        12102200,
+        13163700
+      ],
+      "median_ns": 12257100,
+      "p95_ns": 13163700,
+      "throughput_mib_s": 652.6829347888163,
+      "checksum": 11974563265124071073
+    },
+    {
+      "engine": "kzip-rust",
+      "operation": "write",
+      "workload": "mixed-8m",
+      "method": "store",
+      "files": 8,
+      "bytes": 8388608,
+      "samples_ns": [
+        12432400,
+        13347100,
+        14778200,
+        14555300,
+        13570100,
+        14670500,
+        14622600
+      ],
+      "median_ns": 14555300,
+      "p95_ns": 14778200,
+      "throughput_mib_s": 549.6279705674222,
+      "checksum": 11974563265124071073
+    },
+    {
+      "engine": "kzip-rust",
+      "operation": "read",
+      "workload": "mixed-8m",
+      "method": "store",
+      "files": 8,
+      "bytes": 8388608,
+      "samples_ns": [
+        27840800,
+        26559600,
+        27185000,
+        26095000,
+        26594600,
+        25874200,
+        28657600
+      ],
+      "median_ns": 26594600,
+      "p95_ns": 28657600,
+      "throughput_mib_s": 300.8129469892384,
+      "checksum": 11974563265124071073
+    },
+    {
+      "engine": "libzip-c",
+      "operation": "write",
+      "workload": "mixed-8m",
+      "method": "deflate",
+      "files": 8,
+      "bytes": 8388608,
+      "samples_ns": [
+        87161900,
+        89555100,
+        95738000,
+        104869000,
+        90725800,
+        89360600,
+        93462100
+      ],
+      "median_ns": 90725800,
+      "p95_ns": 104869000,
+      "throughput_mib_s": 88.17778404819798,
+      "checksum": 11974563265124071073
+    },
+    {
+      "engine": "libzip-c",
+      "operation": "read",
+      "workload": "mixed-8m",
+      "method": "deflate",
+      "files": 8,
+      "bytes": 8388608,
+      "samples_ns": [
+        13557900,
+        13784800,
+        13143100,
+        13393400,
+        14319600,
+        14067600,
+        14628800
+      ],
+      "median_ns": 13784800,
+      "p95_ns": 14628800,
+      "throughput_mib_s": 580.3493703209332,
+      "checksum": 11974563265124071073
+    },
+    {
+      "engine": "kzip-rust",
+      "operation": "write",
+      "workload": "mixed-8m",
+      "method": "deflate",
+      "files": 8,
+      "bytes": 8388608,
+      "samples_ns": [
+        95424900,
+        96994200,
+        96459700,
+        95903700,
+        101395500,
+        106701600,
+        103877000
+      ],
+      "median_ns": 96994200,
+      "p95_ns": 106701600,
+      "throughput_mib_s": 82.4791585476245,
+      "checksum": 11974563265124071073
+    },
+    {
+      "engine": "kzip-rust",
+      "operation": "read",
+      "workload": "mixed-8m",
+      "method": "deflate",
+      "files": 8,
+      "bytes": 8388608,
+      "samples_ns": [
+        21325700,
+        18610900,
+        19064300,
+        20558400,
+        21045600,
+        21343100,
+        21304700
+      ],
+      "median_ns": 21045600,
+      "p95_ns": 21343100,
+      "throughput_mib_s": 380.1269624054434,
+      "checksum": 11974563265124071073
+    },
+    {
+      "engine": "libzip-c",
+      "operation": "write",
+      "workload": "single-16m",
+      "method": "store",
+      "files": 1,
+      "bytes": 16777216,
+      "samples_ns": [
+        33140200,
+        31980900,
+        31871300,
+        33397300,
+        30787800,
+        30734600,
+        31750700
+      ],
+      "median_ns": 31871300,
+      "p95_ns": 33397300,
+      "throughput_mib_s": 502.01905789848547,
+      "checksum": 671936593037417354
+    },
+    {
+      "engine": "libzip-c",
+      "operation": "read",
+      "workload": "single-16m",
+      "method": "store",
+      "files": 1,
+      "bytes": 16777216,
+      "samples_ns": [
+        26144700,
+        25442800,
+        24227300,
+        23932500,
+        26233500,
+        25341400,
+        24778600
+      ],
+      "median_ns": 25341400,
+      "p95_ns": 26233500,
+      "throughput_mib_s": 631.3779033518274,
+      "checksum": 671936593037417354
+    },
+    {
+      "engine": "kzip-rust",
+      "operation": "write",
+      "workload": "single-16m",
+      "method": "store",
+      "files": 1,
+      "bytes": 16777216,
+      "samples_ns": [
+        24635700,
+        26891700,
+        24475200,
+        26732000,
+        23240800,
+        24131500,
+        24186600
+      ],
+      "median_ns": 24475200,
+      "p95_ns": 26891700,
+      "throughput_mib_s": 653.7229522128522,
+      "checksum": 671936593037417354
+    },
+    {
+      "engine": "kzip-rust",
+      "operation": "read",
+      "workload": "single-16m",
+      "method": "store",
+      "files": 1,
+      "bytes": 16777216,
+      "samples_ns": [
+        40392300,
+        40128600,
+        38867700,
+        39618500,
+        41254600,
+        38326600,
+        37707700
+      ],
+      "median_ns": 39618500,
+      "p95_ns": 41254600,
+      "throughput_mib_s": 403.85173593144617,
+      "checksum": 671936593037417354
+    },
+    {
+      "engine": "libzip-c",
+      "operation": "write",
+      "workload": "single-16m",
+      "method": "deflate",
+      "files": 1,
+      "bytes": 16777216,
+      "samples_ns": [
+        81562700,
+        79860100,
+        77395400,
+        75193500,
+        75400600,
+        75953700,
+        79804900
+      ],
+      "median_ns": 77395400,
+      "p95_ns": 81562700,
+      "throughput_mib_s": 206.73063256989434,
+      "checksum": 671936593037417354
+    },
+    {
+      "engine": "libzip-c",
+      "operation": "read",
+      "workload": "single-16m",
+      "method": "deflate",
+      "files": 1,
+      "bytes": 16777216,
+      "samples_ns": [
+        25176000,
+        24574800,
+        24908500,
+        26639400,
+        28176900,
+        25591900,
+        25398300
+      ],
+      "median_ns": 25398300,
+      "p95_ns": 28176900,
+      "throughput_mib_s": 629.9634227487667,
+      "checksum": 671936593037417354
+    },
+    {
+      "engine": "kzip-rust",
+      "operation": "write",
+      "workload": "single-16m",
+      "method": "deflate",
+      "files": 1,
+      "bytes": 16777216,
+      "samples_ns": [
+        31833000,
+        30700400,
+        38661400,
+        30651500,
+        31828900,
+        37348600,
+        31595200
+      ],
+      "median_ns": 31828900,
+      "p95_ns": 38661400,
+      "throughput_mib_s": 502.68780887809504,
+      "checksum": 671936593037417354
+    },
+    {
+      "engine": "kzip-rust",
+      "operation": "read",
+      "workload": "single-16m",
+      "method": "deflate",
+      "files": 1,
+      "bytes": 16777216,
+      "samples_ns": [
+        24988000,
+        29166800,
+        27272400,
+        28177400,
+        27706900,
+        28923600,
+        27221000
+      ],
+      "median_ns": 27706900,
+      "p95_ns": 29166800,
+      "throughput_mib_s": 577.4734813349743,
+      "checksum": 671936593037417354
+    }
+  ]
+}

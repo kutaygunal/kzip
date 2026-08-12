@@ -77,11 +77,18 @@ writing. The C baseline was built with Bzip2 enabled and reports Bzip2 write
 support. This is the highest-priority behavioral gap from this pass after the
 header contract issue.
 
-### 4. Encryption capability parity: PASS
+### 4. Encryption capability parity: PASS, signature audit OPEN
 
 Both DLLs report support for ZipCrypto and AES-128/AES-192/AES-256, and reject
 the unsupported AES method tested. Existing round-trip and cross-read tests
 also cover the encrypted write/read paths.
+
+The capability result does not mean the encryption entry point is a complete
+drop-in ABI match. Upstream libzip 1.11.4 declares
+`zip_file_set_encryption(zip_t *, zip_uint64_t, zip_uint16_t, const char *)`,
+while the current Rust export and shipped header expose only the first three
+arguments. C callers that pass a password directly through this entry point
+must not treat the current signature as interchangeable with libzip.
 
 ## Remaining gap priorities
 
@@ -89,6 +96,7 @@ also cover the encrypted write/read paths.
 |---|---|---|
 | High | Shipped `zip.h` omits 70 exported function declarations and 132 upstream constants | Regenerate or systematically expand the header from the supported Rust ABI, then compile a C smoke test against every declaration |
 | Medium | Bzip2 write support differs from the C baseline | Add a Rust Bzip2 encoder or make the C baseline disable Bzip2 compression and document the intentional mismatch |
+| High | `zip_file_set_encryption` has a three-argument Rust/header signature versus libzip's four-argument declaration | Align the exported signature and password semantics, or explicitly expose this as a kzip-specific compatibility variant |
 | Low | Full signature/layout audit for the expanded header | Compare typedefs, flags, structs, and calling conventions after header completion |
 
 ## Closed gaps confirmed
@@ -96,4 +104,3 @@ also cover the encrypted write/read paths.
 The first analysis gaps remain closed: ZIP64 writing, ZIP64 overflow extra
 fields, ZIP64 EOCD records, AES data descriptors, the six missing ABI symbols,
 and the associated regression tests.
-
