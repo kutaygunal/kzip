@@ -27,7 +27,7 @@ CI by default (a tag-gated, approval-gated `release` job is in
 2. Run `cargo +1.75.0 test --workspace` to confirm the MSRV floor.
 3. `cargo release` with the version bump policy in `release.toml`:
    `patch` (compatible), `minor` (breaking pre-1.0), `major` (→ 1.0.0).
-4. Tag and push; record the C-ABI baseline and performance numbers in
+4. Tag and push; record the C-ABI baseline and verification results in
    `results/`.
 
 Release bundles are produced under `release/` (see `release.toml`). On Windows the

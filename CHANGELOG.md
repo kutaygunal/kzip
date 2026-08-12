@@ -19,18 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Root `Cargo.toml` `license` set to `"BSD-3-Clause"` (all crates inherit via
     `license.workspace = true`).
 
-### Added — Phase 5 (commercial readiness)
+### Added — Maintenance
 
-- **Performance acceptance harness:**
-  - `benches/src/bin/c_serial.rs` — C libzip serial throughput (MiB/s) via
-    `libloading` over the `zip_*` ABI.
-  - `benches/src/bin/rust_serial.rs` — Rust `zip-core` serial throughput for the
-    same corpus.
-  - `benches/src/lib.rs` — shared deterministic mixed benchmark corpus.
-  - `scripts/bench-serial.sh` — driver that runs both and prints the Rust/C ratio
-    against the ≥90% serial gate.
-  - Results recorded in `results/phase5-benchmarks.md`, `results/c-serial.csv`,
-    `results/rust-serial.csv`.
 - **Security & audit trail:**
   - Rewrote `deny.toml` for `cargo-deny 0.20` (bans/licenses/advisories all
     pass; `cargo audit` reports 0 vulnerabilities).
@@ -69,7 +59,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Parallel compression (rayon) with deterministic, byte-identical output.
   - Zero-copy read path + `BufferPool`.
   - Async adapter crate `zip-async` (bridge).
-  - Benchmarks: `parallel` (scaling + determinism), `zerocopy` (memory).
 - **Phase 4 — C ABI & hardening:**
   - `zip-sys` `#[no_mangle]` FFI layer + `cbindgen`-generated `zip.h`
     (hand-maintained in `crates/zip-sys/include/zip.h`).

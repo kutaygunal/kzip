@@ -50,7 +50,8 @@
 //! `zip_source_win32handle_create`, `zip_source_buffer_fragment`,
 //! `zip_source_buffer_fragment_create`, `zip_buffer_fragment`.
 //!
-//! DEFERRED (see `docs/ABI.md`): none remaining — Phases 1–8 are complete.
+//! The exported surface is intentionally a subset; see `docs/ABI.md` and the
+//! committed header for the current symbols and known compatibility gaps.
 #![allow(unsafe_code)]
 
 use libc::{c_char, c_int, c_void};
@@ -798,7 +799,7 @@ fn fill_zip_stat(sb: &mut zip_stat, s: &Stat) {
 /// `zip_stat_t` layout, mirroring libzip's `zip_stat` struct
 /// (`valid`,`name`,`index`,`size`,`comp_size`,`mtime`,`crc`,`comp_method`,
 /// `encryption_method`,`flags`). The trailing `flags` field makes the Rust
-/// struct 60 bytes, matching the C layout for drop-in ABI compatibility.
+/// struct 60 bytes, matching the C layout for ABI compatibility.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct zip_stat {

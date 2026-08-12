@@ -1,280 +1,137 @@
-<div align="center">
+# kzip
 
-# 🗜️ kzip — Memory-Safe ZIP in Rust
+`kzip` is an independent Rust implementation of the core ideas and public ZIP
+workflow of [libzip](https://libzip.org/). It can read, create, inspect, and
+modify ZIP archives, and it provides both an idiomatic Rust API and a
+libzip-shaped C ABI layer.
 
-A from-scratch, memory-safe Rust reimplementation of [libzip](https://libzip.org/), drop-in ABI-compatible at the `zip_*` boundary — read, create, and modify ZIP archives in pure safe Rust, with a `zip-sys` cdylib for existing C consumers.
+This is a compatibility-oriented project, not a claim that the Rust library is
+the original libzip or a complete replacement for every libzip release.
 
-[![CI — 3 OS](https://img.shields.io/github/actions/workflow/status/kutaygunal/kzip/ci.yml?label=CI%20%283-OS%29&logo=github)](https://github.com/kutaygunal/kzip/actions/workflows/ci.yml)
-[![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD--3--Clause-blue.svg)](LICENSE)
-[![MSRV 1.75](https://img.shields.io/badge/MSRV-1.75-blue)](#build--test)
-[![Stars](https://img.shields.io/github/stars/kutaygunal/kzip?style=social)](https://github.com/kutaygunal/kzip)
+## What is in the repository
 
-**📦 Repository:** [github.com/kutaygunal/kzip](https://github.com/kutaygunal/kzip)
+| Crate | Role |
+| --- | --- |
+| `zip-core` | Safe Rust engine for ZIP parsing, reading, writing, editing, codecs, and encryption. |
+| `zip-async` | Tokio adapter for asynchronous archive entry reads. |
+| `zip-sys` | `cdylib` exposing the implemented `zip_*` C ABI surface and `zip.h`. |
+| `ziptools` | Rust archive comparison tool, including the `zipcmp`-style CLI. |
+| `differential` | Verification harness that compares the Rust ABI with a C libzip build. |
+| `fuzz` | Standalone cargo-fuzz targets for malformed archive and codec input. |
 
-</div>
+## Features
 
----
+- Read and write standard ZIP archives, including stored and DEFLATE entries.
+- Bzip2 decoding through the Rust codec layer.
+- ZIP64 reading, central-directory validation, CRC/size checks, and typed errors.
+- ZipCrypto and WinZip AES-128, AES-192, and AES-256 read/write support.
+- Archive editing: add, replace, delete, rename, comments, extra fields, and
+  metadata through the supported APIs.
+- Optional deterministic parallel compression of independent files.
+- Zero-copy-friendly sources, buffer reuse, memory mapping, and a Tokio read
+  adapter.
+- A C ABI layer for applications that use the supported subset of libzip's
+  `zip_*` API.
 
-> **Status (v1.0.0):** core read/write/compress paths are verified **byte-for-byte equivalent** to C libzip **1.11.4** on the equivalence corpus — encryption, streaming sources, progress/cancel, archive flags, and Win32 sources all implemented.
+The core crate is written with `#![deny(unsafe_code)]`. The FFI crate necessarily
+contains the unsafe boundary required to expose C pointers and handles.
 
----
+## Rust example
 
-## 📸 Performance
+```rust
+use std::io::{Cursor, Read};
+use zip_core::{write_archive, Archive, ArchiveFile, CompressOptions, Result};
 
-![C libzip vs kzip throughput](docs/benchmarks/benchmark-throughput.png)
+fn main() -> Result<()> {
+    let files = vec![
+        ArchiveFile::new("hello.txt", b"Hello from kzip".to_vec()),
+        ArchiveFile::new("data.bin", vec![0; 4096]),
+    ];
 
-> Median throughput on identical deterministic corpora, **C libzip 1.11.4** vs **kzip (Rust)**, same machine (Windows, MSVC release, 24 logical CPUs, DEFLATE level 6). *Higher is better.*
+    let bytes = write_archive(&files, &CompressOptions::default())?;
+    let archive = Archive::open(Cursor::new(bytes))?;
 
----
+    let mut reader = archive.open_entry(0)?;
+    let mut output = Vec::new();
+    reader.read_to_end(&mut output)?;
+    assert_eq!(output, b"Hello from kzip");
+    Ok(())
+}
+```
 
-## 📖 Overview
-
-**kzip** is a from-scratch, memory-safe Rust reimplementation of libzip. It reads, creates, and modifies ZIP archives in pure safe Rust, and ships a `zip-sys` cdylib so existing C consumers link unchanged.
-
-**Why kzip:**
-1. **Memory safety by construction** — the entire engine is `#![deny(unsafe_code)]`; malformed input is rejected with typed `ZipError`s instead of crashing.
-2. **Drop-in C ABI** — `zip-sys` exports libzip's `zip_*` symbols from a `cdylib`, so existing libzip consumers link unchanged.
-3. **Speed with parallelism** — deterministic, byte-identical parallel compression (rayon) plus a zero-copy decode path — **16.6× faster** than C libzip on multi-file compression, **2.2×** on full-archive reads.
-4. **Byte-for-byte compatibility** — deterministic output that matches C libzip on the equivalence corpus (DEFLATE 6, same inputs, same machine).
-
----
-
-## 🛠️ What's Inside
-
-| Crate | Purpose |
-|-------|---------|
-| `zip-core` | Safe core engine: compress (parallel), read, modify, crypto, zero-copy |
-| `zip-async` | Tokio-based async archive I/O |
-| `zip-sys` | `zip_*` C ABI cdylib (`zip.dll`) + `include/zip.h` |
-| `ziptools` | CLI tooling (`kzipcmp.exe`) |
-| `benches/` | Criterion + C-vs-Rust benchmark harnesses |
-| `differential/` | C-vs-Rust equivalence harness |
-| `fuzz/` | No-panic fuzz targets |
-| `libzip/` | Original C libzip reference library (differential testing) |
-| `docs/` | Design, phase, benchmark docs + chart PNGs |
-| `results/` | Benchmark CSVs, reports, phase test cases |
-
----
-
-## ✨ Features
-
-- **Encryption: read + write.** ZipCrypto (traditional PKWARE, `ZIP_EM_TRAD_PKWARE`) and WinZip AES 128/192/256 (AE-2).
-- **Streaming `zip_source_*`.** Buffer/function/layered/window/zip sources — `zip_source_buffer`, `zip_source_function`, etc.
-- **`zip_open_from_source` / `zip_fdopen`** and write-mode sources.
-- **Progress & cancel callbacks** on the write path (cooperative, deterministic).
-- **Archive flags, `unchange*`, method-query, and file-error APIs.**
-- **Win32 sources + `zip_buffer_fragment`.**
-- **True in-place modify** — rewrites only the central-directory + EOCD tail, reusing compressed member bytes (~8× faster than C).
-- **`read_random` optimizations** — lightweight header skip, cached offsets, mmap zero-copy source (~1.8× faster than C).
-- **Parallel compression** with byte-identical, deterministic output across worker counts.
-- **Zero-copy decode** via `BufferPool` / `decode_slice_into`.
-- **C ABI `cdylib`** — `zip.dll` exposing libzip-compatible `zip_*` symbols.
-
----
-
-## 🚀 Getting Started
-
-### Prerequisites
-- [Rust 1.75+](https://www.rust-lang.org/) (MSRV)
-- *(Optional)* A C compiler, for the `zip-sys` cdylib
-
-### 1. Rust — add `zip-core`
+Add the core crate to an application with:
 
 ```sh
 cargo add zip-core
 ```
 
-Build a couple of entries and write a ZIP, then open it back and read an entry:
+For file-level changes, `modify_archive` returns modified bytes and
+`modify_archive_file` updates an archive on disk while reusing existing member
+data where possible. The migration guide maps common libzip calls to their Rust
+counterparts: [`docs/migration.md`](docs/migration.md).
 
-```rust
-use std::io::{Cursor, Read};
-use zip_core::{write_archive, Archive, ArchiveFile, CompressOptions};
+## kzip compared with libzip
 
-fn main() -> zip_core::Result<()> {
-    // Build two entries and write them to a ZIP in memory (DEFLATE 6, parallel).
-    let files = vec![
-        ArchiveFile::new("hello.txt", b"Hello from kzip!".to_vec()),
-        ArchiveFile::new("data.bin", vec![0u8; 4096]),
-    ];
-    let zip_bytes = write_archive(&files, &CompressOptions::default())?;
+The local reference used by this repository is C libzip **1.11.4**. The
+comparison below describes capabilities, not runtime speed:
 
-    // Open the bytes back as an archive and read an entry.
-    let archive = Archive::open(Cursor::new(zip_bytes))?;
-    assert_eq!(archive.len(), 2);
+| Area | Original libzip | kzip |
+| --- | --- | --- |
+| Implementation | Portable C library with its complete public C API. | Rust workspace with `zip-core`, an async adapter, tools, and an FFI layer. |
+| Rust API | Not applicable. | Ownership-based `Result` API over `Read`/`Seek` sources. |
+| C API | Full libzip API for the release. | Implemented compatibility subset in `zip-sys`; see [`docs/ABI.md`](docs/ABI.md). |
+| Archive operations | Read, create, modify, revert, and close/write. | Read, create, modify, comments, metadata, and supported revert/edit operations. |
+| ZIP formats | ZIP and ZIP64 read/write. | ZIP and ZIP64 reading; ZIP64 writing remains an open compatibility gap. |
+| Codecs | Store, DEFLATE, Bzip2, LZMA, and Zstandard when configured. | Store, DEFLATE, and Bzip2; LZMA and Zstandard are not currently implemented. |
+| Encryption | Traditional PKWARE encryption and WinZip AES. | Traditional PKWARE encryption and WinZip AES-128/192/256. |
+| Sources | Broad `zip_source_*` family, including file, callback, layered, and window sources. | Rust `Source` abstractions and the implemented `zip-sys` source functions; not every libzip source symbol is exported. |
+| Parallelism | Library API is primarily synchronous; applications choose their own concurrency. | Optional Rayon-based parallel compression with deterministic archive ordering. |
+| Safety model | C callers own memory and handle lifetime. | Safe core APIs; C callers still need normal FFI ownership and lifetime discipline. |
 
-    let mut reader = archive.open_entry(0)?;
-    let mut out = Vec::new();
-    reader.read_to_end(&mut out)?;
-    assert_eq!(out, b"Hello from kzip!");
-    Ok(())
-}
-```
+Known ABI differences are intentionally documented rather than hidden. In
+addition to ZIP64 writing, the current compatibility layer still has a small
+number of missing or legacy-only entry points, such as `zip_file_rename`,
+`zip_source_buffer_create`, `zip_error_to_data`, and deprecated add/replace
+aliases. Treat `zip-sys` as a supported subset until the exact header and
+symbol status says otherwise.
 
-In-place modification (renames + deletes) reuses compressed data and only rewrites the central directory:
+## Comparing behavior with the original C library
 
-```rust
-use std::path::Path;
-use zip_core::{modify_archive, modify_archive_file, Archive, ArchiveFile, CompressOptions};
+The repository includes a differential harness for behavioral verification. It
+compares read/stat/error results and performs cross-reading of archives written
+by each implementation. Timing is not treated as evidence of correctness.
 
-let bytes = write_archive(&files, &CompressOptions::default())?;
-let patched = modify_archive(&bytes, &[(0, "renamed.txt".into())], &[1])?;
-modify_archive_file(Path::new("out.zip"), &[(0, "renamed.txt".into())], &[1])?; // true in-place
-```
-
-### 2. CLI & C ABI
-
-**CLI.** The release ships `kzipcmp.exe` (a port of libzip's `zipcmp`, built from `ziptools`):
+The verification workflow expects a C libzip 1.11.4 DLL at
+`libs/c/zip.dll` and Bash on the path:
 
 ```sh
-kzipcmp.exe --help
-kzipcmp.exe -p /path/to/corpus.zip /other.zip   # compare two archives
+cargo test --workspace
+bash run-verify.sh
 ```
 
-**C ABI.** Link against the `zip-sys` `cdylib` (`zip.dll`) and include
-[`crates/zip-sys/include/zip.h`](crates/zip-sys/include/zip.h):
-
-```c
-#include <stdio.h>
-#include "zip.h"
-
-int main(void) {
-    int err = 0;
-    zip_t *za = zip_open("archive.zip", 0, &err);   /* 0 = read-only */
-    if (za == NULL) { fprintf(stderr, "zip_open: %d\n", err); return 1; }
-
-    zip_int64_t n = zip_get_num_entries(za, 0);
-    printf("entries: %lld\n", (long long)n);
-
-    /* Read the first entry to EOF. */
-    zip_file_t *zf = zip_fopen_index(za, 0, 0);
-    char buf[4096];
-    zip_int64_t got;
-    while ((got = zip_fread(zf, buf, sizeof buf)) > 0) {
-        /* consume buf[0..got] */
-    }
-    zip_fclose(zf);
-    zip_close(za);
-    return 0;
-}
-```
-
-Build with `cc app.c zip.dll` and drop in the DLL. No Rust toolchain required at the consumer side.
-
----
-
-## 🏆 Performance Highlights
-
-| Parallel compression | Full-archive read | Modify in place |
-|:---:|:---:|:---:|
-| **16.6×** vs C<br/>6,203 MiB/s (24 workers) | **2.2×** vs C<br/>4,991 MiB/s | **8.2×** vs C<br/>0.23 ms (true in-place) |
-
-> Full tables and charts below, with honest caveats (see [Benchmarks (detail)](#benchmarks-detail)).
-
----
-
-## 📊 Benchmarks (detail)
-
-<details>
-<summary><b>Full C-vs-Rust table, zip-tools table, and remaining charts</b></summary>
-
-### C libzip vs Rust zip-core
-
-| Workload | C libzip 1.11.4 | kzip (Rust) | Ratio | Verdict |
-|----------|-----------------|-------------|-------|---------|
-| Compress small (1–64 KiB) | 441.7 MiB/s | 650.9 MiB/s | **1.47×** | Rust faster |
-| Compress large (1 GiB) | 369.6 MiB/s | 835.8 MiB/s | **2.26×** | Rust faster |
-| Compress mixed (serial) | 372.9 MiB/s | 855.3 MiB/s | **2.29×** | Rust faster |
-| Compress mixed (**parallel**, 24) | — | 6203.4 MiB/s | **16.6×** vs C | Rust much faster |
-| Read full archive | 2237.5 MiB/s | 4991.2 MiB/s | **2.23×** | Rust faster |
-| Read random entries | 319.1 MiB/s | 579.5 MiB/s | **1.82×** | Rust faster |
-| Modify in place | 1.91 ms | 0.23 ms (in-place) / 9.3 ms (rewrite) | **8.2×** | Rust in-place **faster** |
-
-![Parallel compression speedup](docs/benchmarks/benchmark-parallel.png)
-![Modify in-place latency](docs/benchmarks/benchmark-modify.png)
-![Memory footprint](docs/benchmarks/benchmark-memory.png)
-
-> **Caveats.** Both sides use DEFLATE level 6, but the backends differ (native zlib vs miniz_oxide), so exact compressed-size byte-identity is not expected — this is a codec-settings comparison. C is a file-writer; Rust produces bytes in memory (minor, since output is tiny vs input). On mixed/random data with incompressible input, native zlib can win — the outcome is **codec-backend-dependent**, not architectural. `read_random`/modify gains are from the P0–P4/M1–M4 optimization series. Memory-peak (RSS Δ) for C was unavailable; Rust stays bounded (~10 MiB compress / ~0 read). Async streaming (zip-async) is deferred in the benchmark matrix.
-
-Full methodology, per-workload detail, and raw data are in `results/benchmark-report.md`.
-
-### kzip vs other zip / compression tools
-
-Median timing on a **79.2 MiB** corpus (compressible text + incompressible random), 5 iterations, same machine. **ZIP-format tools** (kzip, 7-Zip, Info-ZIP) are directly comparable; **Zstandard** and **LZ4** use their own single-stream containers and are shown only as general-compression context. *Faster is better for time; lower ratio is better.*
-
-| tool | format | compress | extract | ratio | vs kzip (compress) |
-|------|--------|---------:|--------:|------:|-------------------:|
-| **kzip** (Rust) | ZIP | **44 ms** (1797 MiB/s) | 15 ms | 0.234 | 1.00× |
-| 7-Zip 26.02 | ZIP | 140 ms (564 MiB/s) | **6 ms** | 0.234 | 0.31× |
-| Info-ZIP zip 3.0 | ZIP | 595 ms (133 MiB/s) | 387 ms | 0.234 | 0.07× |
-| Zstandard 1.5.7* | ZSTD | 28 ms (2879 MiB/s) | 16 ms | 0.231 | 1.60× |
-| LZ4 1.10.0* | LZ4 | 43 ms (1821 MiB/s) | 22 ms | 0.234 | 1.01× |
-
-\* non-ZIP single-stream containers — context only.
-
-![Zip-tools compress throughput](docs/benchmarks/zip-tools-compress.png)
-![Zip-tools extract throughput](docs/benchmarks/zip-tools-extract.png)
-![Zip-tools compression ratio](docs/benchmarks/zip-tools-ratio.png)
-
-> **Caveats.** kzip uses `parallel: true` (rayon across files); 7-Zip also multithreads, Info-ZIP is serial — thread counts differ. zstd/lz4 compress one concatenated stream, so their ratio benefits from cross-file redundancy a per-file ZIP cannot. CLI wall-clock includes process startup + disk I/O while kzip compresses in-memory (favours kzip on compress time). Default levels differ (zstd L3, lz4 fast). 7-Zip wins on **extract**.
-
-Full analysis and caveats are in `results/zip-tools-benchmark.md`.
-</details>
-
----
-
-## 🗂️ Project Layout
-
-```
-crates/
-  zip-core/      # safe core engine: compress (parallel), read, modify, crypto, zero-copy
-  zip-async/     # tokio-based async archive I/O
-  zip-sys/       # zip_* C ABI cdylib (zip.dll) + include/zip.h
-  ziptools/      # CLI tooling (kzipcmp.exe)
-benches/         # Criterion + C-vs-Rust benchmark harnesses
-differential/    # C-vs-Rust equivalence harness
-fuzz/            # no-panic fuzz targets
-libzip/          # original C libzip reference library (differential testing)
-docs/            # design, phase, benchmark docs + chart PNGs
-results/         # benchmark CSVs, reports, phase test cases
-```
-
----
-
-## 🔧 Build & Test
+The normal Rust checks are:
 
 ```sh
-cargo build --release
+cargo build --workspace
 cargo test --workspace
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo doc --no-deps --workspace
 ```
 
-Requires **Rust 1.75+** (MSRV). Run the C-vs-Rust equivalence harness with `bash run-verify.sh` and the serial benchmark gate with `bash scripts/bench-serial.sh`.
+The detailed capability mapping is in [`docs/support-matrix.md`](docs/support-matrix.md),
+the C ABI declaration is [`crates/zip-sys/include/zip.h`](crates/zip-sys/include/zip.h),
+and the differential-test notes are in [`docs/regress.md`](docs/regress.md).
 
----
+## Project status
 
-## 🔌 C ABI / FFI Status
+The project is under active development. The most important compatibility work
+is tracked in source tests and the differential harness. APIs may change before
+the crates are considered stable; `zip-core` is currently the only crate
+intended for publication.
 
-`crates/zip-sys` exports a libzip-compatible subset of `zip_*` symbols as a `cdylib` (`zip.dll` / `libzip.so`). The canonical list lives in
-[`crates/zip-sys/include/zip.h`](crates/zip-sys/include/zip.h) — including `zip_open`, `zip_get_num_entries`, `zip_fopen*`, `zip_fread`, `zip_stat*`, `zip_file_add`/`replace`, `zip_delete`/`rename`, `zip_set_default_password`, `zip_file_set_encryption`, `zip_encryption_method_supported`, `zip_source_buffer`, comment/extra-field reads, and version/error helpers.
+## License
 
----
-
-## 🤝 Contributing
-
-Contributions are welcome — open an issue or PR on the [repository](https://github.com/kutaygunal/kzip). Development is driven by a multi-agent workflow; read [`ORCHESTRATION.md`](ORCHESTRATION.md) for the loop, and note the working rules (never run full-filesystem scans; run tests with hard timeouts). Do not push directly — changes go through the devops agent.
-
----
-
-## 📄 License & Acknowledgements
-
-**BSD-3-Clause**, matching libzip (see [LICENSE](LICENSE)).
-
-kzip is an independent from-scratch Rust reimplementation. We gratefully acknowledge **Dieter Baron** and **Thomas Klausner**, the authors of the original C [libzip](https://libzip.org/), whose API, format handling, and reference implementation this project mirrors and validates against.
-
----
-
-<div align="center">
-  Made with 🦀 for memory-safe archives
-</div>
+BSD-3-Clause. See [`LICENSE`](LICENSE). kzip is an independent implementation
+that acknowledges the libzip project and its authors, Dieter Baron and Thomas
+Klausner.

@@ -13,11 +13,6 @@ build/
 libs/c/*.dll
 libs/c/*.lib
 
-# Downloaded third-party zip tools (binaries) — fetched locally for benchmarking
-# Not committed: keep the repo free of exe/dll. See results/zip-tools-benchmark.md
-# and scripts/ for how the benchmark was run.
-third_party/
-
 # Editor
 .vscode/
 .idea/

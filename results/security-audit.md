@@ -26,7 +26,7 @@ commercial-readiness gate. Maps to `PLAN.md` §10 (Security & Memory-Safety).
 ### 3. Licensing cleanup (BSD-3-Clause)
 - Workspace root: `license = "BSD-3-Clause"`.
 - All crates inherit via `license.workspace = true`:
-  `zip-core`, `zip-async`, `zip-sys`, `ziptools`, `libzip-benches`, `differential`.
+  `zip-core`, `zip-async`, `zip-sys`, `ziptools`, `differential`.
 - **Fixed:** `fuzz/Cargo.toml` had **no license field**; added
   `license = "BSD-3-Clause"` (+ `rust-version = "1.75"`).
 - `deny.toml` allow-list trimmed to match licenses actually in the graph
@@ -56,7 +56,7 @@ commercial-readiness gate. Maps to `PLAN.md` §10 (Security & Memory-Safety).
   person"; reviewed at each `cargo deny` run, currently none flagged.
 - The core crate enforces `#![deny(unsafe_code)]` (no `unsafe` in zip-core);
   `unsafe` is confined to the FFI boundary (`zip-sys`, differential harness,
-  benchmark harness) and `zerocopy` casts, which are audit-verified upstream.
+  test harnesses) and `zerocopy` casts, which are audit-verified upstream.
 - Cargo-rdme intralinks are stripped in the README (stable-only build); the
   full intra-doc links remain in the crate docs.
 - Advisory database freshness: CI `cargo audit` job fetches the live database

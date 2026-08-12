@@ -169,14 +169,14 @@ via `read_zip64_eocd_correct_field_offsets` and migration chunk 1).
 ### 4.1 Functional-gap table (capability × Rust status × C status)
 
 Status legend:
-- **IMPLEMENTED** = working in Rust core AND exported through the `zip-sys` C ABI (drop-in usable).
+- **IMPLEMENTED** = working in Rust core AND exported through the `zip-sys` C ABI.
 - **IN-CORE** = working in Rust core but not exported via the C ABI.
 - **PARTIAL** = partially implemented (see Notes).
 - **MISSING** = absent from Rust entirely (present in C).
 
 C public API surface enumerated from `libzip/lib/zip.h`: **128 real `zip_*`
 functions** (129 matches minus the `zip_int64_t` typedef). Rust `zip-sys`
-exports **125** `extern "C" fn zip_*` symbols → **122 are drop-in
+exports **125** `extern "C" fn zip_*` symbols → **122 are implemented
 implementations of C API functions** and **3 are extra helpers**
 (`zip_source_window`, `zip_source_args_seek`, `zip_buffer_fragment`). **6 C
 functions remain missing from the ABI.**
@@ -227,7 +227,7 @@ functions remain missing from the ABI.**
 | `zip_libzip_version` | IMPLEMENTED | IMPLEMENTED | ✓ | CLOSED |
 | File-error APIs (`zip_file_error_*`, `zip_file_get_error`) | IMPLEMENTED | IMPLEMENTED | ✓ | CLOSED |
 
-**Net ABI count:** 128 C functions − 6 missing = **122 drop-in exported** (plus
+**Net ABI count:** 128 C functions − 6 missing = **122 exported in the supported subset** (plus
 3 Rust extras). 6 missing: `zip_file_rename`, `zip_source_buffer_create`,
 `zip_error_to_data`, and deprecated aliases `zip_add`, `zip_add_dir`,
 `zip_replace`.
@@ -301,7 +301,7 @@ ZIP64-write (A) and data-descriptor edge (F/G).
    `encryption_method`, timezone-aware `mtime`, truncated→`35`, error-string
    capitalization, `zip_stat_t` trailing `flags`, and the zip-bomb/mutex
    security caps.
-4. **ABI surface: 122 / 128 C functions are exported drop-in** (was 14/128).
+4. **ABI surface: 122 / 128 C functions are implemented in the exported subset** (was 14/128).
    The 6 remaining C functions are: `zip_file_rename`,
    `zip_source_buffer_create`, `zip_error_to_data`, and deprecated aliases
    `zip_add`, `zip_add_dir`, `zip_replace`.
@@ -328,5 +328,5 @@ ZIP64-write (A) and data-descriptor edge (F/G).
 - No unbounded commands; cargo/test/verify runs are timeout-bounded.
 - `zip-core` core logic is unchanged by this gap-analysis pass (it is a
   read-only audit of the current committed state; HEAD `4baed17`).
-- The only uncommitted working-tree changes are regenerated benchmark CSVs /
-  `benchmark-report.md` from the prior benchmark task, not core source.
+- The report records the differential verification state; generated local output
+  files are intentionally not part of the source tree.

@@ -3,8 +3,8 @@
 This guide helps existing libzip C consumers migrate to the Rust port. There are two
 paths, depending on whether you can recompile:
 
-- **Drop-in (no source change):** link the `zip-sys` cdylib, which exports the same
-  `zip_*` C ABI as libzip. See [C ABI / FFI status](ABI.md).
+- **C ABI migration:** link the `zip-sys` cdylib for the implemented subset of the
+  `zip_*` C ABI. Check [C ABI / FFI status](ABI.md) before replacing a libzip build.
 - **Idiomatic Rust:** use `zip-core` directly. This is the recommended path for new code.
 
 The idiomatic API maps libzip's model onto Rust's ownership and `io` traits.
@@ -86,7 +86,7 @@ use zip_core::{modify_archive, modify_archive_file};
 // Rename entry 0, delete entry 1 → new bytes in memory.
 let patched = modify_archive(&zip_bytes, &[(0, "renamed.txt".to_string())], &[1])?;
 
-// Same operation, truly in place, on disk (~8× faster than C).
+// Same operation on disk, reusing existing compressed member data where possible.
 modify_archive_file(Path::new("out.zip"), &[(0, "renamed.txt".to_string())], &[1])?;
 ```
 
@@ -100,8 +100,8 @@ panic-free on malformed input (see [Fuzzing & hardening](fuzzing.md)).
 ## What is *not* yet migrated
 
 - **Async streaming:** use `zip-async` (tokio bridge) for non-blocking I/O.
-- **Full C ABI parity:** the `zip-sys` FFI layer covers the read/write surface; check
-  [ABI.md](ABI.md) and the generated header for the exact symbol set.
+- **C ABI coverage:** the `zip-sys` FFI layer covers the documented read/write surface;
+  check [ABI.md](ABI.md) and the header for the exact symbol set and known gaps.
 - **Codecs:** Zstd/LZMA are not yet enabled in the C baseline or the Rust codec layer
   (see the codec matrix in [Support matrix](support-matrix.md)); DEFLATE, Bzip2, and
   Store are available in both.

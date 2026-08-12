@@ -26,7 +26,7 @@ push-remote = "origin"
 pre-release-commit-message = "chore(release): {{version}}"
 
 # Publish to crates.io by default. Crates whose Cargo.toml sets
-# `publish = false` (zip-async, zip-sys, ziptools, libzip-benches, differential)
+# `publish = false` (zip-async, zip-sys, ziptools, differential)
 # are automatically skipped; only `zip-core` is publishable at this stage.
 publish = true
 

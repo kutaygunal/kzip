@@ -1,9 +1,8 @@
 # kzip
 
-A **from-scratch, memory-safe Rust reimplementation of [libzip](https://libzip.org/)**,
-drop-in ABI-compatible at the `zip_*` boundary. kzip reads, creates, and modifies ZIP
-archives in pure safe Rust, and ships a `zip-sys` cdylib so existing C consumers link
-unchanged.
+A **from-scratch, memory-safe Rust implementation inspired by [libzip](https://libzip.org/)**.
+kzip reads, creates, and modifies ZIP archives in Rust, and ships a `zip-sys` cdylib
+that implements a documented subset of the `zip_*` C API.
 
 ## What kzip is
 
@@ -11,13 +10,12 @@ unchanged.
   no `unsafe` in the core. Malformed input is rejected with typed `ZipError`s instead of
   crashing, and the corpus is fuzzed for the no-panic invariant (see
   [Fuzzing & hardening](fuzzing.md)).
-- **Drop-in C ABI.** `zip-sys` exports libzip's `zip_*` symbols (`zip_open`, `zip_fopen`,
-  `zip_stat`, …) from a `cdylib` and ships a matching `zip.h`. See [C ABI / FFI status](ABI.md).
-- **Byte-for-byte compatibility.** Deterministic output that matches C libzip **1.11.4** on
-  the equivalence corpus. See [libzip regress mapping](regress.md).
-- **Speed.** Deterministic parallel compression over independent files plus a zero-copy
-  decode path — on the benchmark machine ~16× faster than C on multi-file compression,
-  ~2× on full-archive reads, ~8× on true in-place modify. See [Benchmarks](benchmarks.md).
+- **C ABI subset.** `zip-sys` exports implemented libzip-shaped `zip_*` symbols such as
+  `zip_open`, `zip_fopen`, and `zip_stat` from a `cdylib` and ships `zip.h`. See [C ABI / FFI status](ABI.md).
+- **Behavioral verification.** The differential harness compares read, stat, error,
+  and cross-read results with C libzip **1.11.4** on the committed corpus. See [libzip regress mapping](regress.md).
+- **Focused extensions.** Deterministic parallel compression, a zero-copy decode path,
+  and a Tokio adapter are available in addition to the libzip-shaped core API.
 
 The workspace (see the [Support matrix](support-matrix.md)):
 
@@ -25,7 +23,7 @@ The workspace (see the [Support matrix](support-matrix.md)):
 |-------|---------|
 | `zip-core` | Safe engine: read / write / modify, compress, encrypt, stream sources |
 | `zip-async` | Tokio adapter exposing the engine behind `AsyncRead` |
-| `zip-sys` | C-ABI `cdylib` + generated `zip.h`, drop-in with libzip |
+| `zip-sys` | C-ABI `cdylib` + `zip.h`, implemented libzip-shaped subset |
 | `ziptools` | `zipcmp`-style CLI tools (ships as `kzipcmp.exe` on Windows) |
 | `differential` | C-vs-Rust equivalence harness (see [regress](regress.md)) |
 
@@ -87,9 +85,8 @@ exact exported symbol set.
 
 - **[Migration guide](migration.md)** — moving from C libzip to kzip, path by path.
 - **[C ABI / FFI status](ABI.md)** — exported `zip_*` symbols, building the cdylib.
-- **[Benchmarks](benchmarks.md)** — C-vs-Rust numbers and charts.
+- **[Regression mapping](regress.md)** — how the Rust tests and differential harness map to libzip behavior.
 - **[Fuzzing & hardening](fuzzing.md)** — the no-panic-on-malformed-input posture.
-- **[libzip regress mapping](regress.md)** — equivalence vs libzip 1.11.4.
 - **[Support matrix](support-matrix.md)** — platforms, codecs, feature flags.
 - **[MSRV & Release Policy](msrv.md)** — Rust 1.75 floor and release flow.
 

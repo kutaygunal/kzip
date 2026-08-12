@@ -11,7 +11,6 @@ platforms, MSRV, codecs, and feature flags.
 | `zip-async` | Async streaming adapter | `publish = false` for now |
 | `zip-sys` | C-ABI `cdylib` FFI layer | `publish = false` for now |
 | `ziptools` | `zipcmp`/`zipmerge`/`ziptool` equivalents | `publish = false` |
-| `libzip-benches` | Criterion + C/Rust serial harnesses | `publish = false` |
 | `differential` | C-vs-Rust differential harness | `publish = false` |
 | `libzip-fuzz` | cargo-fuzz targets (standalone) | `publish = false` |
 
@@ -64,17 +63,10 @@ bindings in `zip-core` track the same capabilities:
 - `zip-async`: default (tokio bridge).
 - `zip-sys`: default (cdylib + rlib).
 
-## Performance gates
-
-See `results/phase5-benchmarks.md` for measured numbers vs. the §9.5 acceptance
-gates (serial ≥90% of C; parallel ≥1.8×/3×/5× at 2/4/8 workers with
-byte-identical output). **Serial gate not yet met** (≈84%); parallel scaling and
-determinism are green.
-
 ## Publishing
 
 `zip-core` is the only publishable crate at this stage. `publish = false` crates
-(`zip-async`, `zip-sys`, `ziptools`, `benches`, `differential`) cannot be pushed
+(`zip-async`, `zip-sys`, `ziptools`, `differential`) cannot be pushed
 to crates.io as-is; they are intended for internal/workspace use. Plan for 1.0:
 
 - Remove `publish = false` from crates intended for public consumption.

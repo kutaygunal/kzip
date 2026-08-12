@@ -7,7 +7,7 @@ fn main() {
     res.set("ProductName", "kzip");
     res.set(
         "FileDescription",
-        "kzip - Rust port of libzip (C ABI, drop-in zip.dll)",
+        "kzip - Rust port of libzip (libzip-shaped C ABI)",
     );
     res.set("CompanyName", "kzip contributors");
     res.set(

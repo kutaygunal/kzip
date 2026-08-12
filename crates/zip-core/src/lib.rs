@@ -16,8 +16,8 @@
 //! 3. **Async streaming** — non-blocking archive read/write via the sibling
 //!    `zip-async` crate.
 //!
-//! A separate `zip-sys` crate exposes the same `zip_*` C ABI as libzip for
-//! drop-in compatibility of existing consumers.
+//! A separate `zip-sys` crate exposes a documented subset of libzip's `zip_*`
+//! C ABI for consumers that need the supported compatibility surface.
 //!
 //! ## Example — compress and decode
 //!

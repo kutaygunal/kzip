@@ -2,7 +2,7 @@
 
 **Planner:** `planner` (w3:p2)
 **Source of truth:** `results/verification-report.md` (§4.1 functional-gap table, §5 prioritized gaps)
-**Cross-checked against:** `results/migration-verification-report.md`, `git log`, current `crates/*` source
+**Cross-checked against:** `results/verification-report.md`, `git log`, current `crates/*` source
 **Date:** 2026
 
 ---
@@ -11,7 +11,7 @@
 
 The `verification-report.md` is dated 2024-08-04 and predates four commits that
 have **already closed** most of its §5 table. The scrum-master must NOT re-assign
-these. Evidence is in `git log` and `results/migration-verification-report.md`.
+these. Evidence is in `git log` and `results/verification-report.md`.
 
 | §5 item | Gap | Status | Evidence |
 |---|---|---|---|

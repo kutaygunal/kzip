@@ -16,7 +16,7 @@ return `Err`, never panic. This is enforced by:
 ## Security model
 
 - **No `unsafe` in `zip-core` / `zip-async`** (`#![deny(unsafe_code)]`). Unsafe
-  is confined to the FFI boundary (`zip-sys`) and test/bench crates.
+is confined to the FFI boundary (`zip-sys`) and test crates.
 - **Checked arithmetic** in the parser (reject overflows with `ZipError`).
 - **Bounded allocation**: entries and buffers are size-capped where practical.
 

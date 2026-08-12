@@ -22,7 +22,7 @@ OUT="$ROOT/results"
 
 mkdir -p "$OUT"
 
-echo "== Building differential + cdylib (differential only; benches left untouched) =="
+echo "== Building differential harness + cdylib =="
 cargo build --release --package differential --package zip-sys
 
 if [ ! -f "$LIB_RUST" ]; then

@@ -40,8 +40,8 @@ impl Decoder {
                 // (capped at the 8 KiB default) instead of always allocating a
                 // full 8 KiB buffer per entry. Tiny entries (the read_random
                 // workload, ~512 B..=4 KiB) allocate only what they need;
-                // large entries keep the 8 KiB buffer, so read_full throughput
-                // is unchanged. Correctness is unaffected: a smaller buffer
+                // Large entries keep the 8 KiB buffer, so full reads stay
+                // bounded. Correctness is unaffected: a smaller buffer
                 // merely means more underlying reads.
                 let cap = (comp_size as usize).clamp(1, 8192);
                 let dec = flate2::bufread::DeflateDecoder::new(BufReader::with_capacity(cap, take));
