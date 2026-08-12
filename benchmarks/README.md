@@ -34,8 +34,11 @@ cargo run --release -p differential --bin benchmark -- `
   --samples 7 --warmups 2
 python benchmarks/render.py `
   results/benchmark-$(Get-Date -Format yyyy-MM-dd).json `
-  docs/benchmarks/benchmark.svg docs/benchmarks/benchmark-animation.svg
+  docs/benchmarks/benchmark.svg
 ```
+
+The renderer writes the static chart used by the project documentation. Pass a
+third output path when you also want an animated chart for local experiments.
 
 The current workload set is intentionally varied:
 
