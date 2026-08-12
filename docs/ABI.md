@@ -40,6 +40,12 @@ The Rust core also provides an idiomatic `Source` trait, deterministic optional
 parallel compression, and async entry reads through `zip-async`. Those Rust APIs
 are separate from the C ABI.
 
+The release DLL currently exports all 128 public `zip_*` functions enumerated
+from the local libzip 1.11.4 header, plus three Rust-specific helper exports.
+The committed C header is not yet a complete declaration mirror: it declares
+58 of those 128 functions. See the [second gap analysis](../results/second-gap-analysis.md)
+for the exact header and capability differences.
+
 ## Deliberate compatibility differences
 
 The following differences are known and should be checked before replacing an
@@ -49,8 +55,10 @@ existing libzip build:
   codec availability, and unexposed flags. C callers must use the shipped
   header and should not assume every upstream symbol is present.
 - The local C baseline has Bzip2 enabled for read/write while the Rust core
-  currently exposes Bzip2 decoding; Store and DEFLATE are the portable Rust
-  write codecs.
+  currently exposes Bzip2 decoding only; Store and DEFLATE are the portable
+  Rust write codecs.
+- The shipped header still omits declarations for many functions already
+  exported by the DLL; this is a header-completeness gap under active follow-up.
 - LZMA/XZ and Zstandard are disabled in the committed C baseline and are not
   enabled in the Rust codec layer.
 
