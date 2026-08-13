@@ -5,6 +5,28 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2] - 2026-08-12
+
+### Added
+
+- A clearer open-source project overview, product positioning, contribution
+  guidance, and compatibility notes in the root README.
+- A static benchmark dashboard suitable for GitHub and other Markdown
+  renderers.
+
+### Changed
+
+- Optimized the Rust benchmark hot paths for Store and DEFLATE reads and
+  writes, including shared read-only data, streaming reads, and reduced buffer
+  copying.
+- Updated the benchmark renderer and documentation to make the static chart the
+  canonical project artifact.
+
+### Fixed
+
+- Synchronized `crates/zip-core/README.md` with its crate-level rustdoc so the
+  `cargo rdme --check` CI job passes.
+
 ## [Unreleased]
 
 ### Fixed — licensing
