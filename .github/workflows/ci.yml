@@ -147,3 +147,30 @@ jobs:
             cargo release --dry-run
           fi
 
+  # Builds the Windows x86_64 release package (kzip.dll cdylib + kzipcmp.exe +
+  # kzip.h + LICENSE + README.md) and attaches the zip to the GitHub release
+  # for the pushed `v*` tag. Runs automatically on tag pushes; independent of
+  # the crates.io `release` job above.
+  package:
+    name: package (windows-x86_64 zip)
+    runs-on: windows-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # make-release.sh: cargo build zip-sys (cdylib -> zip.dll) + ziptools
+      # (zipcmp.exe), rename to kzip.*, add LICENSE/README, compress to
+      # release/kzip-<version>-windows-x86_64.zip.
+      - name: Build and package release zip
+        shell: bash
+        run: bash scripts/make-release.sh
+      # Create the release if missing, or upload to the existing tag release.
+      - name: Attach zip to GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/kzip-*-windows-x86_64.zip
+          fail_on_unmatched_files: true
+
