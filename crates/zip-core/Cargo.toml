@@ -6,6 +6,10 @@ rust-version.workspace = true
 license.workspace = true
 description = "Safe Rust core engine for reading/writing ZIP archives (libzip port)."
 readme = "README.md"
+# Inherit repo URL from the workspace; crates.io publishing requires at least
+# one of documentation / homepage / repository (cargo-release fails otherwise).
+repository.workspace = true
+documentation = "https://docs.rs/zip-core"
 
 [dependencies]
 thiserror.workspace = true

@@ -13,6 +13,13 @@
 # cargo-release bumps them together and creates one tag.
 shared-version = "workspace"
 
+# The CI release job is triggered by a `v*` TAG push, so `actions/checkout`
+# leaves the worktree in detached HEAD. cargo-release's default
+# `allow-branch = ["*", "!HEAD"]` refuses to release from branch `HEAD` and
+# the dry-run fails with "cannot release from branch `HEAD`". Override to allow
+# it (drop the `!HEAD` exclusion) so tag-triggered releases work.
+allow-branch = ["*"]
+
 # Commit/tag signing is OFF by default. Enable with a configured GPG/SSH key:
 #   sign-commit = true
 #   sign-tag = true
