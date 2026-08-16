@@ -54,9 +54,18 @@ impl BufferPool {
     }
 
     /// Return a buffer to the pool for reuse. Buffers beyond `capacity` are
-    /// dropped so the pool stays bounded.
-    pub fn release(&mut self, buf: Vec<u8>) {
+    /// dropped so the pool stays bounded. Buffers that are too large (e.g. > 4MB)
+    /// are shrunk using shrink_to_fit to avoid keeping bloated memory in the pool.
+    pub fn release(&mut self, mut buf: Vec<u8>) {
         if self.pool.len() < self.capacity {
+            const MAX_RETAINED_CAPACITY: usize = 4 * 1024 * 1024; // 4MB
+            if buf.capacity() > MAX_RETAINED_CAPACITY {
+                buf.shrink_to_fit();
+                // If it is still too large after shrinking, we drop it to protect the heap
+                if buf.capacity() > MAX_RETAINED_CAPACITY {
+                    return;
+                }
+            }
             self.pool.push_back(buf);
         }
     }
@@ -157,5 +166,15 @@ mod tests {
         );
         pool.release(small);
         assert_eq!(pool.len(), 1);
+    }
+
+    #[test]
+    fn releases_large_buffer_under_max_capacity() {
+        let mut pool = BufferPool::new(1);
+        // Allocation greater than 4MB
+        let large_vec = vec![0u8; 5 * 1024 * 1024];
+        pool.release(large_vec);
+        // The pool capacity guard should prevent holding a > 4MB buffer in memory
+        assert_eq!(pool.len(), 0, "large buffers must be dropped or shrunk below limit");
     }
 }
