@@ -264,9 +264,17 @@ impl EntryReader {
         if self.seeked {
             return true;
         }
+        
+        // Fast path check: if the size is already wrong, fail early without checking CRC to save CPU cycles
+        if self.size_read != self.expected_size {
+            let err = io::Error::new(io::ErrorKind::InvalidData, "Size mismatch");
+            self.integrity_err = Some(err);
+            return false;
+        }
+        
         let crc_ok = !self.check_crc || self.crc.clone().finalize() == self.expected_crc;
-        if self.size_read != self.expected_size || !crc_ok {
-            let err = io::Error::new(io::ErrorKind::InvalidData, "CRC or size mismatch");
+        if !crc_ok {
+            let err = io::Error::new(io::ErrorKind::InvalidData, "CRC mismatch");
             self.integrity_err = Some(err);
             false
         } else {
@@ -314,6 +322,16 @@ impl Read for EntryReader {
         if n > 0 {
             self.crc.update(&buf[..n]);
             self.size_read += n as u64;
+            
+            // Streaming Zip-bomb guard: check if uncompressed size exceeds limits
+            const ABSOLUTE_LIMIT: u64 = 32 * 1024 * 1024; // 32MB max decompressed per entry
+            let size_limit = self.expected_size.max(ABSOLUTE_LIMIT).saturating_add(1024 * 1024); // expected size + 1MB safety buffer
+            if self.size_read > size_limit {
+                let err = io::Error::new(io::ErrorKind::InvalidData, "Decompression limit exceeded (potential Zip bomb)");
+                self.integrity_err = Some(err);
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "Decompression limit exceeded"));
+            }
+            
             Ok(n)
         } else {
             // EOF of the decompressed stream: verify size + CRC.

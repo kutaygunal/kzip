@@ -208,6 +208,11 @@ impl Dirent {
             )
         };
 
+        // Path Traversal Guard: Reject filenames attempting directory traversal (e.g. including '..') or absolute paths
+        if filename.contains("..") || filename.starts_with('/') || filename.starts_with('\\') {
+            return Err(ZipError::new(ZipErrorCode::Incons));
+        }
+
         Ok(Dirent {
             version_madeby,
             version_needed,
@@ -707,5 +712,15 @@ mod tests {
             Dirent::parse_central(&mut c).unwrap_err().code(),
             ZipErrorCode::Nozip
         );
+    }
+
+    #[test]
+    fn rejects_path_traversal_filenames() {
+        for bad_path in ["../etc/passwd", "/absolute/path", "..\\windows\\system32"] {
+            let data = build_central(bad_path, 8, 0, 10, 100, 0x99);
+            let mut c = Cursor::new(data.as_slice());
+            let err = Dirent::parse_central(&mut c).unwrap_err();
+            assert_eq!(err.code(), ZipErrorCode::Incons);
+        }
     }
 }
