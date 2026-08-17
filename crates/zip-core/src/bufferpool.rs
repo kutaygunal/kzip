@@ -175,6 +175,10 @@ mod tests {
         let large_vec = vec![0u8; 5 * 1024 * 1024];
         pool.release(large_vec);
         // The pool capacity guard should prevent holding a > 4MB buffer in memory
-        assert_eq!(pool.len(), 0, "large buffers must be dropped or shrunk below limit");
+        assert_eq!(
+            pool.len(),
+            0,
+            "large buffers must be dropped or shrunk below limit"
+        );
     }
 }
